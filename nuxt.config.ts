@@ -74,7 +74,7 @@ export default defineNuxtConfig({
     },
   },
   devServer: {
-    port: 9090,
+    port: 9092,
   },
   nitro: {
     experimental: {
