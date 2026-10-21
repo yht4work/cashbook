@@ -1,3 +1,5 @@
+import type { Flow } from "./table";
+
 // 统一最外层包装类
 export interface Result<T> {
   c: number;
@@ -84,6 +86,12 @@ export class FlowQuery {
   attribution?: string;
   description?: string;
   moneySort?: string;
+  // 按「该字段为空」筛选（图表下钻时，用于承载空值归并出来的那一组）
+  attributionEmpty?: boolean;
+  industryTypeEmpty?: boolean;
+  payTypeEmpty?: boolean;
+  // 精确匹配（图表下钻时用；搜索框输入则走模糊匹配）
+  attributionExact?: boolean;
 }
 
 export interface Server {
@@ -106,9 +114,20 @@ export interface CommonChartQuery {
 }
 export interface CommonChartData {
   type: string; // 数据标记 key，可能是日期、年月、支出类型、收入类型等，视具体使用场景而定
+  isEmpty?: boolean; // 该类目对应的原始字段为空（type 此时是展示用的占位名）
   inSum: number; // 收入
   outSum: number; // 支出
   zeroSum: number; // 不计收支
+}
+
+// 流水明细的一行：与 Flow 是同一张表的同一批字段，直接复用
+export type DayDetail = Flow;
+
+// 某一天的明细排行榜
+export interface DayDetailResult {
+  rows: DayDetail[]; // 明细排行，最多 limit 条
+  count: number; // 当天该类型的总笔数（不受 limit 影响）
+  sum: number; // 当天该类型的总金额（不受 limit 影响）
 }
 
 export interface Typer {

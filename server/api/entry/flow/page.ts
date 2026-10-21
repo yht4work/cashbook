@@ -71,15 +71,36 @@ export default defineEventHandler(async (event) => {
       equals: body.flowType,
     };
   }
-  if (body.industryType) {
+  // 「该字段为空」：图表把空值归并成一组后下钻时用。
+  // 空包含两种情况：NULL 和空字符串。Prisma 的 in 里不能放 null，
+  // 所以要用 OR 把两种情况并起来。
+  const orConds: any[] = [];
+  if (body.industryTypeEmpty) {
+    orConds.push({ industryType: null }, { industryType: "" });
+  } else if (body.industryType) {
     where.industryType = {
       equals: body.industryType,
     };
   }
-  if (body.payType) {
+  if (body.payTypeEmpty) {
+    orConds.push({ payType: null }, { payType: "" });
+  } else if (body.payType) {
     where.payType = {
       equals: body.payType,
     };
+  }
+  // 图表下钻要求精确匹配（见 attribution 的注释）
+  if (body.attributionEmpty) {
+    orConds.push({ attribution: null }, { attribution: "" });
+  } else if (body.attribution) {
+    // 图表下钻时要求精确匹配，这样明细的合计才等于图上的汇总值。
+    // 搜索框里手动输入的部分文字则用模糊匹配。
+    where.attribution = body.attributionExact
+      ? { equals: body.attribution }
+      : { contains: body.attribution };
+  }
+  if (orConds.length > 0) {
+    where.OR = orConds;
   }
   if (body.startDay && body.endDay) {
     where.day = {
@@ -100,11 +121,8 @@ export default defineEventHandler(async (event) => {
       contains: body.name,
     };
   }
-  if (body.attribution) {
-    where.attribution = {
-      contains: body.attribution,
-    };
-  }
+  // 注意：attribution 的筛选统一在上面处理（精确/模糊/为空三种），
+  // 这里不要再写一次 contains，否则会把上面的精确匹配覆盖成模糊匹配。
   if (body.description) {
     where.description = {
       contains: body.description,

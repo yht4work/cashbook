@@ -93,50 +93,60 @@ export default defineEventHandler(async (event) => {
 
   // 初始化结果格式
   const datas = [];
-  const groupedByField: Record<
+  // 用 Map 而不是普通对象：类目名是用户输入的，
+  // 普通对象的话「constructor」「toString」这类名字会撞上
+  // Object.prototype 上的属性，导致该类目被静默丢弃
+  const groupedByField = new Map<
     string,
     {
       type: string;
+      isEmpty: boolean;
       inSum: number;
       outSum: number;
       zeroSum: number;
     }
-  > = {};
+  >();
 
   // 按指定字段分组，合并数据到目标格式
-  dayGroups.reduce((acc, item) => {
-    let fieldValue = item[body.groupBy as keyof typeof item] as string;
-    if (!fieldValue) {
-      fieldValue = "未知";
-    }
+  // groupBy 是运行时才确定的字符串，Prisma 无法静态推断 groupBy 的元素类型，
+  // 这里显式声明需要的字段
+  dayGroups.forEach((item: any) => {
+    const rawValue = item[body.groupBy] as string;
+    // 空值（NULL 或空字符串）归为同一组。
+    // 这里用原始值当 key，所以真实存在的「未知」不会和空值这一组撞车；
+    // 「未知」只是图上的展示名，下钻时靠 isEmpty 还原成「该字段为空」。
+    const isEmpty = !rawValue;
+    const groupKey = rawValue || "";
+    const fieldValue = isEmpty ? "未知" : rawValue;
     const flowType = item.flowType;
     const moneySum = item._sum.money || 0; // 如果 money 为 null，默认值为 0
 
     // 如果当前字段值不存在，则初始化
-    if (!acc[fieldValue]) {
-      acc[fieldValue] = {
+    let group = groupedByField.get(groupKey);
+    if (!group) {
+      group = {
         type: fieldValue,
+        isEmpty,
         inSum: 0,
         outSum: 0,
         zeroSum: 0,
       };
+      groupedByField.set(groupKey, group);
     }
 
     // 根据 flowType 填充对应的 sum
     if (flowType === "收入") {
-      acc[fieldValue].inSum += moneySum;
+      group.inSum += moneySum;
     } else if (flowType === "支出") {
-      acc[fieldValue].outSum += moneySum;
+      group.outSum += moneySum;
     } else if (flowType === "不计收支") {
-      acc[fieldValue].zeroSum += moneySum;
+      group.zeroSum += moneySum;
     }
-
-    return acc;
-  }, groupedByField);
+  });
 
   // 转换为数组格式
-  for (const fieldValue in groupedByField) {
-    datas.push(groupedByField[fieldValue]);
+  for (const group of groupedByField.values()) {
+    datas.push(group);
   }
 
   return success(datas);
