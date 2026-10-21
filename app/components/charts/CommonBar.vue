@@ -7,10 +7,11 @@
         {{ title }}
       </h4>
       <span
-        class="absolute left-0 top-0 text-xs text-blue-500 dark:text-blue-400 hover:text-blue-700 cursor-pointer rounded-md shadow-sm transition-colors"
-        @click="toggleLegend()"
+        v-if="foldedCount > 0"
+        class="absolute left-0 top-0 text-xs text-ink-muted"
+        :title="`共 ${totalCount} 个类目，图中只显示金额最高的 ${topN} 个，其余合并为「其他」`"
       >
-        {{ showLegend ? "隐藏图例" : "显示图例" }}
+        前 {{ topN }} 项 / 共 {{ totalCount }} 项
       </span>
     </div>
 
@@ -61,10 +62,9 @@
 <script setup lang="ts">
 import * as echarts from "echarts";
 import { onMounted, ref, watch } from "vue";
-import { dateFormater, miniFullscreen } from "@/utils/common";
-import { doApi } from "@/utils/api";
+import { doApi } from "~/utils/api";
 import type { CommonChartData, CommonChartQuery } from "~/utils/model";
-import DatasFlowTable from "@/components/datas/FlowTable.vue";
+import DatasFlowTable from "~/components/datas/FlowTable.vue";
 
 const { isDark } = useAppTheme();
 
@@ -78,13 +78,11 @@ interface Props {
   endDay?: string;
   flowType?: string;
   seriesName?: string; // 系列名称
-  showLegend?: boolean; // 是否显示图例
   queryField?: string; // 点击时传递给FlowTable的查询字段名
 }
 
 const props = withDefaults(defineProps<Props>(), {
   seriesName: "数据分析",
-  showLegend: true,
   queryField: "payType", // 默认为payType，保持向下兼容
 });
 
@@ -98,44 +96,55 @@ const chartParam = ref<CommonChartQuery & { groupBy: string }>({
   groupBy: props.groupBy,
 });
 
-const dataList: any[] = [];
-const xAxisData: string[] = [];
 const noData = ref(false);
+// 类目太多时只画金额最高的几个，其余合并成「其他」
+const topN = 12;
+const totalCount = ref(0);
+const foldedCount = ref(0);
 
 const optionRef = ref({
   tooltip: {
-    trigger: "item", // 改为item触发，每个柱子独立
-  },
-  legend: {
-    show: props.showLegend, // 根据props控制图例显示
-    data: xAxisData, // 图例对应每个x轴数据项
-    textStyle: {
-      color: "#374151",
-    },
-  },
-  toolbox: {
-    feature: {
-      // 下载按钮
-      // saveAsImage: {}
+    trigger: "item",
+    formatter: (params: any) => {
+      const name = params?.name ?? "";
+      const value = Number(params?.value ?? 0);
+      return `${name}<br/>金额：${value.toFixed(2)} 元`;
     },
   },
   xAxis: {
     type: "category",
-    data: xAxisData,
+    data: [] as string[],
+    axisLine: { lineStyle: { color: "#d1d5db" } },
+    axisTick: { show: false },
     axisLabel: {
       rotate: 45, // 标签旋转45度，防止重叠
       fontSize: 12,
+      color: "#6b7280",
+      hideOverlap: true,
+      formatter: (value: string) => truncate(value),
     },
   },
   yAxis: {
     type: "value",
     name: "金额(元)",
+    nameTextStyle: { color: "#6b7280" },
+    splitLine: { lineStyle: { color: "#e5e7eb", type: "dashed" } },
+    axisLabel: { color: "#6b7280" },
+  },
+  grid: {
+    left: 8,
+    right: 16,
+    // 顶部给数值标签留位置，底部给旋转后的横轴标签留位置
+    top: 36,
+    bottom: 64,
+    containLabel: true,
   },
   series: [
     {
       name: props.seriesName,
       type: "bar",
-      data: dataList, // 这里的数据需要包含name属性
+      data: [] as any[],
+      barMaxWidth: 30,
       itemStyle: {
         color: "rgba(217,159,8, 0.9)", // 默认黄色（支出色）
         borderRadius: [4, 4, 0, 0], // 顶部圆角
@@ -143,10 +152,9 @@ const optionRef = ref({
       label: {
         show: true,
         position: "top",
-        fontSize: 12,
-        formatter: function (params: any) {
-          return Number(params.value).toFixed(2);
-        },
+        fontSize: 11,
+        color: "#6b7280",
+        formatter: (params: any) => compactMoney(params.value),
       },
       emphasis: {
         itemStyle: {
@@ -160,6 +168,20 @@ const optionRef = ref({
 let chartDiv: any;
 let chart: echarts.ECharts;
 
+/** 横轴标签过长时截断，完整名称放在 tooltip 里 */
+const truncate = (value: string) =>
+  value.length > 5 ? `${value.substring(0, 5)}…` : value;
+
+/** 柱顶数值：过万折成「万」，避免标签互相压住 */
+const compactMoney = (value: any) => {
+  const num = Number(value);
+  if (!num) return "";
+  if (Math.abs(num) >= 10000) {
+    return `${(num / 10000).toFixed(1)}万`;
+  }
+  return num.toFixed(0);
+};
+
 const doQuery = (query: CommonChartQuery & { groupBy: string }) => {
   doApi
     .post<CommonChartData[]>("api/entry/analytics/common", {
@@ -167,90 +189,86 @@ const doQuery = (query: CommonChartQuery & { groupBy: string }) => {
       ...query,
     })
     .then((res) => {
-      if (res) {
-        if (res.length === 0) {
-          noData.value = true;
-          return;
-        } else {
-          noData.value = false;
-        }
-
-        // 清空数据
-        dataList.length = 0;
-        xAxisData.length = 0;
-
-        if (query.flowType == "支出") {
-          // 先排序
-          res.sort((a, b) => Number(b.outSum) - Number(a.outSum));
-          res.forEach((data) => {
-            xAxisData.push(data.type);
-            dataList.push({
-              name: data.type,
-              value: Number(data.outSum).toFixed(2),
-            });
-          });
-        } else if (query.flowType == "收入") {
-          // 先排序
-          res.sort((a, b) => Number(b.inSum) - Number(a.inSum));
-          res.forEach((data) => {
-            xAxisData.push(data.type);
-            dataList.push({
-              name: data.type,
-              value: Number(data.inSum).toFixed(2),
-            });
-          });
-        } else {
-          // 先排序
-          res.sort((a, b) => Number(b.zeroSum) - Number(a.zeroSum));
-          res.forEach((data) => {
-            xAxisData.push(data.type);
-            dataList.push({
-              name: data.type,
-              value: Number(data.zeroSum).toFixed(2),
-            });
-          });
-        }
-
-        // 重新渲染图表
-        optionRef.value.xAxis.data = xAxisData;
-        optionRef.value.series[0].data = dataList;
-        optionRef.value.legend.data = xAxisData; // 更新图例数据
-        optionRef.value.legend.textStyle.color = isDark.value
-          ? "#e5e7eb"
-          : "#374151";
-
-        // 根据流水类型设置不同颜色，参考MonthBar.vue
-        if (query.flowType == "支出") {
-          optionRef.value.series[0].itemStyle.color = "rgba(217,159,8, 0.9)"; // 黄色
-          optionRef.value.series[0].emphasis.itemStyle.color =
-            "rgba(217,159,8, 1)";
-        } else if (query.flowType == "收入") {
-          optionRef.value.series[0].itemStyle.color = "rgba(76, 152, 112, 0.9)"; // 绿色
-          optionRef.value.series[0].emphasis.itemStyle.color =
-            "rgba(76, 152, 112, 1)";
-        } else {
-          optionRef.value.series[0].itemStyle.color = "rgba(66, 66, 66, 0.9)"; // 灰色
-          optionRef.value.series[0].emphasis.itemStyle.color =
-            "rgba(66, 66, 66, 1)";
-        }
-
-        // 确保图表完全重新渲染
-        chart.clear();
-        chart.setOption(optionRef.value);
+      if (!res) return;
+      if (res.length === 0) {
+        noData.value = true;
+        return;
       }
+      noData.value = false;
+
+      // 取出当前收支类型对应的金额
+      const sumOf = (d: CommonChartData) => {
+        if (query.flowType === "支出") return Number(d.outSum);
+        if (query.flowType === "收入") return Number(d.inSum);
+        return Number(d.zeroSum);
+      };
+
+      // 从高到低排序
+      const sorted = [...res].sort((a, b) => sumOf(b) - sumOf(a));
+      totalCount.value = sorted.length;
+
+      // 类目过多时只保留前 N 个，其余合并成「其他」
+      const head = sorted.slice(0, topN);
+      const tail = sorted.slice(topN);
+      foldedCount.value = tail.length;
+
+      const xAxisData: string[] = [];
+      const dataList: any[] = [];
+      head.forEach((d) => {
+        xAxisData.push(d.type);
+        dataList.push({
+          name: d.type,
+          value: sumOf(d).toFixed(2),
+          // 记下这一类是不是「原始字段为空」归并出来的，
+          // 点开时要用它来还原筛选条件
+          isEmpty: !!d.isEmpty,
+        });
+      });
+      if (tail.length > 0) {
+        const otherSum = tail.reduce((sum, d) => sum + sumOf(d), 0);
+        xAxisData.push("其他");
+        dataList.push({
+          name: `其他（${tail.length} 项）`,
+          value: otherSum.toFixed(2),
+          // 标记这是合并出来的类目（横轴标签只是「其他」，
+          // 真正的 data name 是「其他（N 项）」，不能靠字符串判断）
+          isOther: true,
+        });
+      }
+
+      // 重新渲染图表
+      optionRef.value.xAxis.data = xAxisData;
+      optionRef.value.series[0].data = dataList;
+      optionRef.value.xAxis.axisLabel.color = isDark.value
+        ? "#9ca3af"
+        : "#6b7280";
+      optionRef.value.yAxis.axisLabel.color = isDark.value
+        ? "#9ca3af"
+        : "#6b7280";
+
+      // 根据流水类型设置不同颜色，参考MonthBar.vue
+      if (query.flowType == "支出") {
+        optionRef.value.series[0].itemStyle.color = "rgba(217,159,8, 0.9)"; // 黄色
+        optionRef.value.series[0].emphasis.itemStyle.color =
+          "rgba(217,159,8, 1)";
+      } else if (query.flowType == "收入") {
+        optionRef.value.series[0].itemStyle.color = "rgba(76, 152, 112, 0.9)"; // 绿色
+        optionRef.value.series[0].emphasis.itemStyle.color =
+          "rgba(76, 152, 112, 1)";
+      } else {
+        optionRef.value.series[0].itemStyle.color = "rgba(66, 66, 66, 0.9)"; // 灰色
+        optionRef.value.series[0].emphasis.itemStyle.color =
+          "rgba(66, 66, 66, 1)";
+      }
+
+      // 确保图表完全重新渲染
+      chart.clear();
+      chart.setOption(optionRef.value);
     });
 };
 
-const showLegend = ref(props.showLegend);
-
-const toggleLegend = () => {
-  showLegend.value = !showLegend.value;
-};
-
-watch(showLegend, () => {
-  optionRef.value.legend.show = showLegend.value;
-  chart.setOption(optionRef.value);
-});
+const query = ref();
+const showFlowTable = ref(false);
 
 // 监听 props 变化，更新 chartParam
 watch(
@@ -269,16 +287,7 @@ watch(
   { deep: true }
 );
 
-const query = ref();
-const showFlowTable = ref(false);
-
 onMounted(() => {
-  // 根据图例显示设置调整布局
-  if (!props.showLegend) {
-    // 不显示图例时，可以给图表更多空间
-    optionRef.value.legend.show = false;
-  }
-
   chartDiv = document.getElementById(chartId.value);
   const oldInstance = echarts.getInstanceByDom(chartDiv);
   if (oldInstance) {
@@ -286,11 +295,21 @@ onMounted(() => {
   }
   chart = echarts.init(chartDiv);
   chart.on("click", function (param: any) {
-    // 根据queryField动态设置查询参数
     const itemName = param.name || (param.data && param.data.name) || "";
+    // 「其他」是合并出来的类目，对不上具体字段，不弹明细。
+    // 用显式标记判断，不靠名字匹配：折叠项的 data name 是「其他（N 项）」，
+    // 而真实存在的类目也可能叫「其他」，用 startsWith 会误伤。
+    if (param.data && param.data.isOther) return;
+    // 根据queryField动态设置查询参数
+    // isEmpty 为真时，说明这一类是「该字段为空」归并出来的：
+    // 不能拿展示名去做 equals 匹配，否则一条都查不到
+    const isEmpty = !!(param.data && param.data.isEmpty);
     query.value = {
       ...chartParam.value,
-      [props.queryField]: itemName,
+      [props.queryField]: isEmpty ? undefined : itemName,
+      [`${props.queryField}Empty`]: isEmpty ? true : undefined,
+      // 图上是按类目精确分组的，明细也要精确匹配，否则合计对不上
+      attributionExact: props.queryField === "attribution" && !isEmpty,
     };
     showFlowTable.value = true;
   });

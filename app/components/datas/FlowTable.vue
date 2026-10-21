@@ -38,10 +38,10 @@
           {{ flowQuery.payType }}
         </span>
         <span
-          v-if="flowQuery.attribution"
+          v-if="flowQuery.attribution || flowQuery.attributionEmpty"
           class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300"
         >
-          {{ flowQuery.attribution }}
+          归属: {{ flowQuery.attributionEmpty ? "未知" : flowQuery.attribution }}
         </span>
         <span
           v-if="!hasFilters"
@@ -588,7 +588,10 @@ const hasFilters = computed(() => {
     flowQuery.value.flowType ||
     flowQuery.value.industryType ||
     flowQuery.value.payType ||
-    flowQuery.value.attribution
+    flowQuery.value.attribution ||
+    flowQuery.value.attributionEmpty ||
+    flowQuery.value.industryTypeEmpty ||
+    flowQuery.value.payTypeEmpty
   );
 });
 

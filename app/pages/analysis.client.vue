@@ -1,332 +1,167 @@
 <template>
   <div class="w-full">
-    <!-- Content Area -->
-    <div class="xl:max-w-[80vw] mx-auto w-full mt-2">
-      <!-- Desktop & Tablet: Chart Carousel -->
-      <div class="w-full" v-if="!loading">
+    <div class="xl:max-w-[80vw] mx-auto w-full mt-2" v-if="!loading">
+      <!-- 时间总控栏：全页唯一的时间来源 -->
+      <div
+        class="w-full bg-surface dark:bg-surface-dark rounded-lg shadow border border-frame dark:border-frame-dark px-3 md:px-4 py-3 mb-4 sticky top-0 z-20"
+      >
         <div
-          class="w-full bg-surface dark:bg-surface-dark rounded-lg shadow border border-frame dark:border-frame-dark p-2 md:p-4 mb-4"
+          class="flex flex-col md:flex-row md:items-center justify-between gap-2 md:gap-4"
         >
-          <!-- Chart Container -->
-          <div
-            class="w-full flex flex-col md:flex-row justify-between md:space-x-4 space-y-4 md:space-y-0 rounded-md p-2"
-          >
-            <div class="w-full border-b md:border-b-0 md:border-r">
-              <DailyLineChart
-                title="每日流水曲线"
-                width="100%"
-                height="300px"
-              />
-            </div>
-            <div class="w-full">
-              <MonthBar title="每月流水统计" width="100%" height="320px" />
-            </div>
-          </div>
-        </div>
-        <div
-          class="w-full bg-surface dark:bg-surface-dark rounded-lg shadow border border-frame dark:border-frame-dark p-2 md:p-4 mb-4"
-        >
-          <!-- Chart Container -->
-          <div
-            class="flex justify-between items-center flex-col md:flex-row gap-2 md:gap-4 md:items-center w-full md:w-auto mb-4"
-          >
-            <h3 class="min-w-20 text-base md:text-lg font-semibold text-ink-primary dark:text-ink-onDark">
-              支出分析
+          <div class="flex items-baseline gap-2 shrink-0">
+            <h3
+              class="text-base md:text-lg font-semibold text-ink-primary dark:text-ink-onDark"
+            >
+              数据分析
             </h3>
-            <!-- 时间筛选和图表类型切换 -->
-            <!-- 时间筛选 -->
-            <div class="flex gap-2 items-center flex-wrap">
-              <UiDatePicker
-                v-model="expenseStartDay"
-                placeholder="开始日期"
-                class="text-sm md:text-base w-36 md:w-48"
-                clearable
-              />
-              <span class="text-ink-muted">至</span>
-              <UiDatePicker
-                v-model="expenseEndDay"
-                placeholder="结束日期"
-                class="text-sm md:text-base w-36 md:w-48"
-                clearable
-                position="right"
-              />
-            </div>
-            <!-- 图表类型切换 -->
-            <div class="flex bg-surface-muted dark:bg-surface-darkMuted rounded-lg p-1">
-              <button
-                @click="expenseChartType = 'pie'"
-                :class="[
-                  'px-3 py-1 text-sm font-medium rounded-md transition-colors',
-                  expenseChartType === 'pie'
-                    ? 'bg-brand-600 text-white'
-                    : 'text-ink-muted hover:text-ink-primary dark:hover:text-ink-onDark',
-                ]"
-              >
-                饼图
-              </button>
-              <button
-                @click="expenseChartType = 'bar'"
-                :class="[
-                  'px-3 py-1 text-sm font-medium rounded-md transition-colors',
-                  expenseChartType === 'bar'
-                    ? 'bg-brand-600 text-white'
-                    : 'text-ink-muted hover:text-ink-primary dark:hover:text-ink-onDark',
-                ]"
-              >
-                柱图
-              </button>
-            </div>
+            <span class="text-xs md:text-sm text-ink-muted">
+              {{ rangeLabel }}
+            </span>
           </div>
-
-          <!-- 饼图展示 -->
-          <div
-            v-if="expenseChartType === 'pie'"
-            class="w-full flex flex-col md:flex-row justify-between md:space-x-4 space-y-4 md:space-y-0 rounded-md p-2"
-          >
-            <div class="w-full border-b md:border-b-0 md:border-r">
-              <ChartsCommonPie
-                title="支付方式分析"
-                width="100%"
-                height="300px"
-                groupBy="payType"
-                flowType="支出"
-                seriesName="支付方式"
-                :showLegend="true"
-                queryField="payType"
-                :startDay="expenseStartDay || undefined"
-                :endDay="expenseEndDay || undefined"
-              />
-            </div>
-            <div class="w-full border-b md:border-b-0 md:border-r">
-              <ChartsCommonPie
-                title="消费类型分析"
-                width="100%"
-                height="300px"
-                groupBy="industryType"
-                flowType="支出"
-                seriesName="消费类型"
-                :showLegend="true"
-                queryField="industryType"
-                :startDay="expenseStartDay || undefined"
-                :endDay="expenseEndDay || undefined"
-              />
-            </div>
-            <div class="w-full">
-              <ChartsCommonPie
-                title="消费归属分析"
-                width="100%"
-                height="300px"
-                groupBy="attribution"
-                flowType="支出"
-                seriesName="消费归属"
-                :showLegend="true"
-                queryField="attribution"
-                :startDay="expenseStartDay || undefined"
-                :endDay="expenseEndDay || undefined"
-              />
-            </div>
+          <div class="min-w-0">
+            <UiTimeRangePicker
+              :startDay="startDay"
+              :endDay="endDay"
+              @update:startDay="startDay = $event"
+              @update:endDay="endDay = $event"
+            />
           </div>
         </div>
+      </div>
 
-        <!-- 柱图展示 -->
+      <!-- 流水概览：每日曲线 + 每月统计 -->
+      <div
+        class="w-full bg-surface dark:bg-surface-dark rounded-lg shadow border border-frame dark:border-frame-dark p-3 md:p-4 mb-4"
+      >
         <div
-          v-if="expenseChartType === 'bar'"
-          class="w-full flex flex-col md:flex-row justify-between md:space-x-4 space-y-4 md:space-y-0 rounded-md p-2"
+          class="w-full flex flex-col md:flex-row md:space-x-6 space-y-5 md:space-y-0"
         >
-          <div class="w-full border-b md:border-b-0 md:border-r">
+          <div class="w-full md:w-1/2 md:pr-6 md:border-r md:border-frame dark:md:border-frame-dark">
+            <DailyLineChart
+              title="每日流水"
+              width="100%"
+              height="300px"
+              :startDay="startDay || undefined"
+              :endDay="endDay || undefined"
+            />
+          </div>
+          <div class="w-full md:w-1/2">
+            <MonthBar
+              title="每月流水"
+              width="100%"
+              height="300px"
+              :startDay="startDay || undefined"
+              :endDay="endDay || undefined"
+            />
+          </div>
+        </div>
+      </div>
+
+      <!-- 支出分析 -->
+      <div
+        class="w-full bg-surface dark:bg-surface-dark rounded-lg shadow border border-frame dark:border-frame-dark p-3 md:p-4 mb-4"
+      >
+        <h3
+          class="text-base md:text-lg font-semibold text-ink-primary dark:text-ink-onDark mb-4"
+        >
+          支出分析
+        </h3>
+
+        <div
+          class="w-full flex flex-col md:flex-row md:space-x-4 space-y-4 md:space-y-0"
+        >
+          <div class="w-full md:border-r md:border-frame dark:md:border-frame-dark md:pr-4">
             <ChartsCommonBar
-              title="支付方式分析"
+              title="支付方式"
               width="100%"
               height="300px"
               groupBy="payType"
               flowType="支出"
               seriesName="支付方式"
-              :showLegend="true"
               queryField="payType"
-              :startDay="expenseStartDay || undefined"
-              :endDay="expenseEndDay || undefined"
+              :startDay="startDay || undefined"
+              :endDay="endDay || undefined"
             />
           </div>
-          <div class="w-full border-b md:border-b-0 md:border-r">
+          <div class="w-full md:border-r md:border-frame dark:md:border-frame-dark md:pr-4">
             <ChartsCommonBar
-              title="消费类型分析"
+              title="消费类型"
               width="100%"
               height="300px"
               groupBy="industryType"
               flowType="支出"
               seriesName="消费类型"
-              :showLegend="true"
               queryField="industryType"
-              :startDay="expenseStartDay || undefined"
-              :endDay="expenseEndDay || undefined"
+              :startDay="startDay || undefined"
+              :endDay="endDay || undefined"
             />
           </div>
           <div class="w-full">
             <ChartsCommonBar
-              title="消费归属分析"
+              title="消费归属"
               width="100%"
               height="300px"
               groupBy="attribution"
               flowType="支出"
               seriesName="消费归属"
-              :showLegend="true"
               queryField="attribution"
-              :startDay="expenseStartDay || undefined"
-              :endDay="expenseEndDay || undefined"
+              :startDay="startDay || undefined"
+              :endDay="endDay || undefined"
             />
           </div>
         </div>
       </div>
-      <div
-        class="w-full bg-surface dark:bg-surface-dark rounded-lg shadow border border-frame dark:border-frame-dark p-2 md:p-4 mb-4"
-      >
-        <!-- Chart Container -->
-        <div
-          class="flex flex-col md:flex-row justify-between items-center gap-2 md:gap-4 md:items-center w-full md:w-auto mb-4"
-        >
-          <h3
-            class="min-w-20 text-base md:text-lg font-semibold text-ink-primary dark:text-ink-onDark"
-          >
-            收入分析
-          </h3>
-          <!-- 时间筛选和图表类型切换 -->
-          <!-- 时间筛选 -->
-          <div class="flex gap-2 items-center flex-wrap">
-            <UiDatePicker
-              v-model="incomeStartDay"
-              placeholder="开始日期"
-              class="text-sm md:text-base w-36 md:w-48"
-              clearable
-            />
-            <span class="text-ink-muted">至</span>
-            <UiDatePicker
-              v-model="incomeEndDay"
-              placeholder="结束日期"
-              class="text-sm md:text-base w-36 md:w-48"
-              clearable
-              position="right"
-            />
-          </div>
-          <!-- 图表类型切换 -->
-          <div class="flex bg-surface-muted dark:bg-surface-darkMuted rounded-lg p-1">
-            <button
-              @click="incomeChartType = 'pie'"
-              :class="[
-                'px-3 py-1 text-sm font-medium rounded-md transition-colors',
-                incomeChartType === 'pie'
-                  ? 'bg-brand-600 text-white'
-                  : 'text-ink-muted hover:text-ink-primary dark:hover:text-ink-onDark',
-              ]"
-            >
-              饼图
-            </button>
-            <button
-              @click="incomeChartType = 'bar'"
-              :class="[
-                'px-3 py-1 text-sm font-medium rounded-md transition-colors',
-                incomeChartType === 'bar'
-                  ? 'bg-brand-600 text-white'
-                  : 'text-ink-muted hover:text-ink-primary dark:hover:text-ink-onDark',
-              ]"
-            >
-              柱图
-            </button>
-          </div>
-        </div>
-        <!-- 饼图展示 -->
-        <div
-          v-if="incomeChartType === 'pie'"
-          class="w-full flex flex-col md:flex-row justify-between md:space-x-4 space-y-4 md:space-y-0 rounded-md p-2"
-        >
-          <div class="w-full border-b md:border-b-0 md:border-r">
-            <ChartsCommonPie
-              title="收款方式分析"
-              width="100%"
-              height="300px"
-              groupBy="payType"
-              flowType="收入"
-              seriesName="收款方式"
-              :showLegend="true"
-              queryField="payType"
-              :startDay="incomeStartDay || undefined"
-              :endDay="incomeEndDay || undefined"
-            />
-          </div>
-          <div class="w-full border-b md:border-b-0 md:border-r">
-            <ChartsCommonPie
-              title="收入类型分析"
-              width="100%"
-              height="300px"
-              groupBy="industryType"
-              flowType="收入"
-              seriesName="收入类型"
-              :showLegend="true"
-              queryField="industryType"
-              :startDay="incomeStartDay || undefined"
-              :endDay="incomeEndDay || undefined"
-            />
-          </div>
-          <div class="w-full">
-            <ChartsCommonPie
-              title="收入归属分析"
-              width="100%"
-              height="300px"
-              groupBy="attribution"
-              flowType="收入"
-              seriesName="收入归属"
-              :showLegend="true"
-              queryField="attribution"
-              :startDay="incomeStartDay || undefined"
-              :endDay="incomeEndDay || undefined"
-            />
-          </div>
-        </div>
 
-        <!-- 柱图展示 -->
-        <div
-          v-if="incomeChartType === 'bar'"
-          class="w-full flex flex-col md:flex-row justify-between md:space-x-4 space-y-4 md:space-y-0 rounded-md p-2"
+      <!-- 收入分析 -->
+      <div
+        class="w-full bg-surface dark:bg-surface-dark rounded-lg shadow border border-frame dark:border-frame-dark p-3 md:p-4 mb-4"
+      >
+        <h3
+          class="text-base md:text-lg font-semibold text-ink-primary dark:text-ink-onDark mb-4"
         >
-          <div class="w-full border-b md:border-b-0 md:border-r">
+          收入分析
+        </h3>
+
+        <div
+          class="w-full flex flex-col md:flex-row md:space-x-4 space-y-4 md:space-y-0"
+        >
+          <div class="w-full md:border-r md:border-frame dark:md:border-frame-dark md:pr-4">
             <ChartsCommonBar
-              title="收款方式分析"
+              title="收款方式"
               width="100%"
               height="300px"
               groupBy="payType"
               flowType="收入"
               seriesName="收款方式"
-              :showLegend="true"
               queryField="payType"
-              :startDay="incomeStartDay || undefined"
-              :endDay="incomeEndDay || undefined"
+              :startDay="startDay || undefined"
+              :endDay="endDay || undefined"
             />
           </div>
-          <div class="w-full border-b md:border-b-0 md:border-r">
+          <div class="w-full md:border-r md:border-frame dark:md:border-frame-dark md:pr-4">
             <ChartsCommonBar
-              title="收入类型分析"
+              title="收入类型"
               width="100%"
               height="300px"
               groupBy="industryType"
               flowType="收入"
               seriesName="收入类型"
-              :showLegend="true"
               queryField="industryType"
-              :startDay="incomeStartDay || undefined"
-              :endDay="incomeEndDay || undefined"
+              :startDay="startDay || undefined"
+              :endDay="endDay || undefined"
             />
           </div>
           <div class="w-full">
             <ChartsCommonBar
-              title="收入归属分析"
+              title="收入归属"
               width="100%"
               height="300px"
               groupBy="attribution"
               flowType="收入"
               seriesName="收入归属"
-              :showLegend="true"
               queryField="attribution"
-              :startDay="incomeStartDay || undefined"
-              :endDay="incomeEndDay || undefined"
+              :startDay="startDay || undefined"
+              :endDay="endDay || undefined"
             />
           </div>
         </div>
@@ -341,47 +176,41 @@ definePageMeta({
   middleware: ["auth"],
 });
 
-import { ref, onMounted, onUnmounted, onBeforeUnmount, nextTick } from "vue";
+import { ref, computed, onMounted, nextTick } from "vue";
+import { dateFormater } from "@/utils/common";
 import DailyLineChart from "~/components/charts/DailyLineChart.vue";
 import MonthBar from "~/components/charts/MonthBar.vue";
 
-const windowWidth = ref(
-  typeof window !== "undefined" ? window.innerWidth : 1200
-);
+// 全页统一的时间范围（总控栏控制，所有图表共用）
+const defaultRange = (() => {
+  const now = new Date();
+  return {
+    startDay: dateFormater(
+      "YYYY-MM-dd",
+      new Date(now.getFullYear(), now.getMonth(), 1)
+    ),
+    endDay: dateFormater("YYYY-MM-dd", now),
+  };
+})();
 
-// 图表类型切换状态
-const expenseChartType = ref<"pie" | "bar">("pie");
-const incomeChartType = ref<"pie" | "bar">("pie");
+const startDay = ref<string | null>(defaultRange.startDay);
+const endDay = ref<string | null>(defaultRange.endDay);
 
-// 时间筛选状态
-const expenseStartDay = ref<string | null>(null);
-const expenseEndDay = ref<string | null>(null);
-const incomeStartDay = ref<string | null>(null);
-const incomeEndDay = ref<string | null>(null);
-
-// 窗口大小变化监听
-const handleResize = () => {
-  windowWidth.value = window.innerWidth;
-};
+// 时间范围摘要
+const rangeLabel = computed(() => {
+  if (!startDay.value && !endDay.value) return "全部时间";
+  if (startDay.value && endDay.value) {
+    return `${startDay.value} 至 ${endDay.value}`;
+  }
+  return startDay.value
+    ? `${startDay.value} 起`
+    : `截至 ${endDay.value}`;
+});
 
 const loading = ref(true);
 onMounted(async () => {
-  if (typeof window !== "undefined") {
-    window.addEventListener("resize", handleResize);
-  }
   // 等待DOM完全渲染
   await nextTick();
   loading.value = false;
-});
-
-onBeforeUnmount(() => {
-  // 清理资源
-  loading.value = true;
-});
-
-onUnmounted(() => {
-  if (typeof window !== "undefined") {
-    window.removeEventListener("resize", handleResize);
-  }
 });
 </script>
