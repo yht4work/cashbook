@@ -75,24 +75,42 @@ export default defineEventHandler(async (event) => {
   // 创建一个Map来跟踪已处理的记录ID
   const processedIds = new Set();
 
+  // 先按「同一天 + 同金额」分桶，把原本的 O(n^2) 全表两两比较降为 O(n)。
+  // 必选条件是 day 与 money 完全相等，所以只有同一个桶里的记录才可能互相匹配。
+  // money 是可空的 Float，这里用 Number 的字符串形式做 key，
+  // 既能区分 null/NaN，也能保证数值相等落到同一个桶。
+  const bucketKey = (flow: any) =>
+    `${flow.day}\u0000${flow.money === null ? "null" : String(flow.money)}`;
+  const buckets = new Map<string, any[]>();
+  for (const flow of allFlows) {
+    const key = bucketKey(flow);
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.push(flow);
+    } else {
+      buckets.set(key, [flow]);
+    }
+  }
+
   // 遍历所有流水记录
   for (let i = 0; i < allFlows.length; i++) {
     const current = allFlows[i];
+    if (!current) continue;
 
     // 如果当前记录已经被处理过，则跳过
     if (processedIds.has(current.id)) continue;
 
-    // 查找与当前记录相似的记录
-    const similarRecords = allFlows.filter((flow, index) => {
-      // 基础条件：不是同一条记录、未被处理过、同一天、金额相同（这些是必选条件）
-      let isSimilar =
-        index !== i &&
-        !processedIds.has(flow.id) &&
-        flow.day === current.day &&
-        flow.money === current.money;
+    // 只在同一天同金额的桶里找相似记录
+    const candidates = buckets.get(bucketKey(current)) || [];
 
-      // 如果基础条件不满足，直接返回false
-      if (!isSimilar) return false;
+    // 查找与当前记录相似的记录
+    const similarRecords = candidates.filter((flow) => {
+      // 基础条件：不是同一条记录、未被处理过、金额严格相等
+      // （同一天已由分桶保证；金额再严格比一次是为了保留 === 的语义，
+      //   例如 NaN !== NaN，两条金额为 NaN 的记录不该被判为重复）
+      if (flow.id === current.id) return false;
+      if (processedIds.has(flow.id)) return false;
+      if (flow.money !== current.money) return false;
 
       // 根据用户选择的条件进行动态判断
       if (criteria.name && flow.name !== current.name) {

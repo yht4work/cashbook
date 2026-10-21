@@ -48,19 +48,34 @@ export default defineEventHandler(async (event) => {
     ],
   });
 
+  // 一次性取回所有可能的候选记录，按金额建索引。
+  // 原来是对每笔支出串行 await 一次 findFirst（N+1，1 万多笔就是 1 万多次查询）。
+  const incomes = await prisma.flow.findMany({
+    where: {
+      flowType: { in: ["收入", "不计收支"] },
+      bookId: String(body.bookId),
+    },
+  });
+
+  // 按金额分组，保留原始顺序，
+  // 这样每组的第一条就等价于原先 findFirst 找到的那一条
+  const incomeByMoney = new Map<number, any[]>();
+  for (const income of incomes) {
+    if (income.money === null || income.money === undefined) continue;
+    const bucket = incomeByMoney.get(income.money);
+    if (bucket) {
+      bucket.push(income);
+    } else {
+      incomeByMoney.set(income.money, [income]);
+    }
+  }
+
   const candidatePairs = [];
 
   // 对每笔支出查找候选记录
   for (const expense of expenditures) {
-    const candidate = await prisma.flow.findFirst({
-      where: {
-        flowType: { in: ["收入", "不计收支"] },
-        // 例如这里以金额完全相等为条件，实际可修改为近似匹配：
-        money: expense.money,
-        bookId: String(body.bookId),
-        // 如有需要，可增加日期、描述等其它条件
-      },
-    });
+    if (expense.money === null || expense.money === undefined) continue;
+    const candidate = incomeByMoney.get(expense.money)?.[0];
     if (candidate) {
       candidatePairs.push({
         out: expense,
