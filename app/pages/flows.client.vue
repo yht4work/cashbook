@@ -11,7 +11,7 @@
 
     <!-- 流水表格 -->
     <FlowsTable :flows="flowPageRef.data || []" :selected-items="selectedFlows" :is-all-selected="isAllSelected"
-      :current-page="flowQuery.pageNum || 1" :page-size="flowQuery.pageSize || 20" :total="flowPageRef.total || 0"
+      :current-page="flowQuery.pageNum || 1" :page-size="flowQuery.pageSize || 30" :total="flowPageRef.total || 0"
       :total-pages="totalPages" :page-numbers="pageNumbers" :loading="loading" @toggle-select-all="toggleSelectAll"
       @toggle-select-item="toggleSelectItem" @edit-item="editItem" @edit-invoice="editInvoice" @delete-item="deleteItem"
       @change-page="changePage" @change-page-size="changePageSize" />
@@ -226,7 +226,7 @@ const titleRowIndex = ref(0);
 
 const flowQuery = ref<any>({
   pageNum: 1,
-  pageSize: 20,
+  pageSize: 30,
   startDay: "",
   endDay: "",
   attribution: "",
@@ -303,7 +303,7 @@ const isAllSelected = computed(() => {
 });
 
 const totalPages = computed(() =>
-  Math.ceil((flowPageRef.value?.total || 0) / (flowQuery.value.pageSize || 20))
+  Math.ceil((flowPageRef.value?.total || 0) / (flowQuery.value.pageSize || 30))
 );
 
 const pageNumbers = computed(() => {
@@ -376,7 +376,7 @@ const handleSearchApply = (query: any) => {
 const resetQuery = () => {
   flowQuery.value = {
     pageNum: 1,
-    pageSize: 20,
+    pageSize: 30,
     startDay: "",
     endDay: "",
     attribution: "",

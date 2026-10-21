@@ -2,9 +2,11 @@
   <div
     class="bg-surface dark:bg-surface-dark shadow-sm border border-frame dark:border-frame-dark overflow-hidden rounded-md md:rounded-lg"
   >
-    <!-- 桌面端表格 -->
-    <div class="hidden md:block max-h-[68vh] overflow-y-auto">
-      <table class="min-w-full divide-y divide-frame-light dark:divide-frame-dark">
+    <!-- 桌面端表格：高度随行数自适应，页面整体滚动，表格内部不再出现滚动条 -->
+    <div class="hidden md:block overflow-x-auto">
+      <table
+        class="w-full min-w-[880px] divide-y divide-frame-light dark:divide-frame-dark"
+      >
         <thead class="bg-surface-soft dark:bg-surface-darkMuted">
           <tr>
             <th
@@ -237,7 +239,7 @@
       >
         暂无数据
       </div>
-      <div class="max-h-[62vh] overflow-y-auto" v-else>
+      <div v-else>
         <div
           v-for="item in flows"
           :key="item.id"
@@ -381,16 +383,20 @@
       v-if="!loading && flows.length && totalPages > 1"
       class="p-2 md:px-4 md:py-3 bg-surface-soft dark:bg-surface-darkMuted border-t border-frame-light dark:border-frame-dark"
     >
-      <div class="flex items-center justify-center gap-2">
+      <div
+        class="flex flex-col sm:flex-row flex-wrap items-center justify-center gap-2 sm:gap-4"
+      >
         <!-- 分页信息 -->
         <div
-          class="text-sm text-ink-secondary dark:text-ink-onDark text-center hidden md:block"
+          class="text-sm text-ink-secondary dark:text-ink-onDark text-center"
         >
           共 {{ total }} 条记录
         </div>
 
         <!-- 分页控件 - 响应式布局 -->
-        <div class="flex flex-row items-center justify-center gap-4">
+        <div
+          class="flex flex-row flex-wrap items-center justify-center gap-3 sm:gap-4"
+        >
           <!-- 每页显示数量选择 -->
           <select
             :value="pageSize"
@@ -403,6 +409,7 @@
             class="text-sm border border-frame dark:border-frame-dark rounded px-2 py-1 bg-surface dark:bg-surface-dark text-ink-primary dark:text-ink-onDark"
           >
             <option value="20">20条/页</option>
+            <option value="30">30条/页</option>
             <option value="50">50条/页</option>
             <option value="100">100条/页</option>
           </select>
