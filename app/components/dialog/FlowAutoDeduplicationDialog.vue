@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import {
   XMarkIcon,
   TrashIcon,
@@ -69,8 +69,14 @@ const fetchDuplicates = () => {
     });
 };
 
-// 初始化获取重复数据
-fetchDuplicates();
+// 只在对话框真正打开时拉数据。
+// 这个接口很重（账本内全部流水两两比较），在 setup 顶层调用的话，
+// 仅仅打开「流水管理」页面就会触发，白白拖慢首屏。
+watch(showAutoDeduplicationFlowsDialog, (visible) => {
+  if (visible) {
+    fetchDuplicates();
+  }
+});
 
 // 删除流水记录
 const deleteFlow = (item: Flow) => {
