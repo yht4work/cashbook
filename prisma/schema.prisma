@@ -57,6 +57,11 @@ model Flow {
   origin       String? // 流水来源：谁谁-支付宝导入；谁谁手动输出
   attribution  String? // 流水归属（谁的收入/支出）
   eliminate    Int?    @default(0) // 平账标志，0未平账；1已平账，-1忽略平账
+
+  // 常用查询都按「账本 + 日期」过滤，加索引避免全表扫描
+  @@index([bookId, day])
+  @@index([bookId, day, money(sort: Desc)])
+  @@index([bookId, flowType])
 }
 
 // Budget 支出计划
