@@ -1,4 +1,4 @@
-import type { CommonChartData } from "./model";
+import type { CommonChartData, DayDetailResult } from "./model";
 
 export const getSystemInfo = async () => {
   return await doApi.get("api/config");
@@ -6,6 +6,17 @@ export const getSystemInfo = async () => {
 
 export const daily = async (data: any): Promise<CommonChartData[]> => {
   return doApi.post<CommonChartData[]>("api/entry/analytics/daily", {
+    ...data,
+    bookId: localStorage.getItem("bookId"),
+  });
+};
+
+export const dayDetail = async (data: {
+  day: string;
+  flowType?: string;
+  limit?: number;
+}): Promise<DayDetailResult> => {
+  return doApi.post<DayDetailResult>("api/entry/analytics/dayDetail", {
     ...data,
     bookId: localStorage.getItem("bookId"),
   });

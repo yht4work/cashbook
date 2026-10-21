@@ -15,6 +15,8 @@ import prisma from "~~/server/lib/prisma";
  *           schema:
  *             bookId: string 账本ID
  *             flowType: string 流水类型（可选）
+ *             startDay: string 开始日期（可选）
+ *             endDay: string 结束日期（可选）
  *     responses:
  *       200:
  *         description: 日常分析数据获取成功
@@ -33,7 +35,7 @@ import prisma from "~~/server/lib/prisma";
  *               }
  */
 export default defineEventHandler(async (event) => {
-  const { bookId, flowType } = await readBody(event); // 获取查询参数
+  const { bookId, flowType, startDay, endDay } = await readBody(event); // 获取查询参数
   if (!bookId) {
     return error("请先选择账本");
   }
@@ -41,6 +43,21 @@ export default defineEventHandler(async (event) => {
   const where: any = {
     bookId,
   }; // 条件查询
+
+  if (startDay && endDay) {
+    where.day = {
+      gte: startDay,
+      lte: endDay,
+    };
+  } else if (startDay) {
+    where.day = {
+      gte: startDay,
+    };
+  } else if (endDay) {
+    where.day = {
+      lte: endDay,
+    };
+  }
 
   if (flowType) {
     where.flowType = {
