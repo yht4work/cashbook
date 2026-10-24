@@ -1,79 +1,101 @@
 <template>
   <div class="w-full">
-    <!-- Calendar Header -->
+    <!-- Calendar Header：步进 | 标题(点开月份选择) | 当月分析 -->
     <div
-      class="flex items-center justify-between px-6 py-4 bg-gradient-to-r from-green-500 to-emerald-600 dark:from-green-950/80 dark:to-emerald-950/80 text-white"
+      class="flex items-center justify-between px-4 md:px-6 py-3 md:py-4 bg-gradient-to-r from-green-500 to-emerald-600 dark:from-green-950/80 dark:to-emerald-950/80 text-white"
     >
-      <!-- Navigation -->
-      <div class="flex items-center gap-4">
+      <!-- Month Navigation -->
+      <div class="flex items-center gap-1.5">
         <button
           @click="prevMonth"
+          aria-label="上一个月"
           class="p-2 rounded-lg bg-white/10 hover:bg-white/20 transition-colors duration-200"
         >
           <ChevronLeftIcon class="w-5 h-5" />
         </button>
-
-        <h2 class="text-xl font-bold min-w-40 text-center">
-          {{ currentMonthText }}
-        </h2>
-
         <button
           @click="nextMonth"
+          aria-label="下一个月"
           class="p-2 rounded-lg bg-white/10 hover:bg-white/20 transition-colors duration-200"
         >
           <ChevronRightIcon class="w-5 h-5" />
         </button>
       </div>
 
+      <!-- Title：点它展开任意年月的选择器 -->
+      <button
+        ref="titleButton"
+        @click="pickerOpen = !pickerOpen"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 transition-colors duration-200"
+        aria-haspopup="dialog"
+        :aria-expanded="pickerOpen"
+      >
+        <h2 class="text-xl font-bold whitespace-nowrap tabular-nums">
+          {{ currentMonthText }}
+        </h2>
+        <ChevronDownIcon
+          class="w-4 h-4 shrink-0 transition-transform duration-200"
+          :class="{ 'rotate-180': pickerOpen }"
+        />
+      </button>
+
       <!-- Analysis Button -->
       <button
         @click="showAnalysis"
-        class="flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors duration-200 font-medium"
+        class="flex items-center gap-2 px-3 md:px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors duration-200 font-medium"
       >
         <ChartBarIcon class="w-5 h-5" />
         当月分析
       </button>
     </div>
 
+    <!-- 年月选择器（Teleport 到 body） -->
+    <MonthPicker
+      :open="pickerOpen"
+      :anchor="titleButton"
+      :current-date="currentDate"
+      :expense-months="expenseMonths"
+      :income-months="incomeMonths"
+      @select="selectMonth"
+      @close="pickerOpen = false"
+    />
+
     <!-- Weekday Headers -->
     <div
-      class="grid grid-cols-7 bg-green-50 dark:bg-transparent border-b border-green-200 dark:border-green-900/30"
+      class="grid grid-cols-7 border-b border-frame dark:border-frame-dark"
     >
       <div
         v-for="day in weekdays"
         :key="day"
-        class="py-4 text-center text-sm font-semibold text-green-700 dark:text-green-500/50 uppercase tracking-wide"
+        class="py-3 text-center text-xs md:text-sm font-medium text-brand-600 dark:text-brand-300/60"
       >
         {{ day }}
       </div>
     </div>
 
-    <!-- Calendar Grid -->
-    <div class="grid grid-cols-7 gap-px bg-green-100 dark:bg-black">
+    <!-- Calendar Grid：发丝线分隔，格子保持安静，金额本身做视觉重点 -->
+    <div class="grid grid-cols-7 gap-px bg-frame-light dark:bg-emerald-950/60">
       <div
         v-for="date in calendarDates"
         :key="date.key"
-        class="min-h-36 p-4 flex flex-col relative transition-all duration-200 hover:bg-green-50 dark:hover:bg-green-800/20 hover:-translate-y-0.5 hover:shadow-lg border border-green-50 dark:border-green-900"
+        class="group min-h-32 md:min-h-36 p-2 md:p-3 flex flex-col relative bg-green-50/70 dark:bg-green-950/40 transition-colors duration-150 hover:bg-green-100 dark:hover:bg-green-900/40"
         :class="{
-          'bg-green-50 dark:bg-transparent text-gray-400 dark:text-green-700':
-            !date.isCurrentMonth,
-          'bg-green-100 dark:bg-green-950/50':
-            date.isCurrentMonth && !date.isWeekend && !date.isToday,
-          'bg-green-200 dark:bg-green-800/50 border-2 border-green-400 dark:border-green-700':
+          'bg-surface-muted/60 dark:bg-white/[0.04] text-ink-muted': !date.isCurrentMonth,
+          'ring-2 ring-inset ring-brand-500 dark:ring-brand-300':
             date.isToday,
-          'bg-green-50/50 dark:bg-green-950/30':
-            date.isWeekend && date.isCurrentMonth,
         }"
       >
         <!-- Date and Add Button -->
-        <div class="flex justify-between items-start mb-3">
+        <div class="flex justify-between items-start mb-2">
           <span
-            class="text-lg font-medium"
+            class="inline-flex items-center justify-center w-7 h-7 rounded-full text-sm tabular-nums"
             :class="{
-              'text-green-600 dark:text-green-500/60 font-bold': date.isToday,
-              'text-gray-900 dark:text-gray-100':
+              'bg-green-600 dark:bg-green-500 text-white font-semibold':
+                date.isToday,
+              'text-ink-primary dark:text-ink-onDark':
                 date.isCurrentMonth && !date.isToday,
-              'text-gray-400 dark:text-green-700/30': !date.isCurrentMonth,
+              'text-ink-muted/60 dark:text-ink-onDark/30':
+                !date.isCurrentMonth,
             }"
           >
             {{ date.day }}
@@ -81,33 +103,38 @@
           <button
             v-if="date.isCurrentMonth"
             @click="addFlow(date)"
-            class="w-7 h-7 rounded-full bg-green-500 hover:bg-green-600 dark:bg-green-700 dark:hover:bg-green-600 text-white flex items-center justify-center transition-all duration-200 hover:scale-110 opacity-70 hover:opacity-100"
+            aria-label="记一笔"
+            class="w-7 h-7 rounded-full flex items-center justify-center transition-all duration-150 text-green-700 dark:text-green-500 opacity-60 group-hover:opacity-100 group-hover:bg-green-100 dark:group-hover:bg-green-900/40 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-green-600"
           >
             <PlusIcon class="w-4 h-4" />
           </button>
         </div>
 
         <!-- Flow Data -->
-        <div v-if="date.isCurrentMonth" class="flex flex-col gap-2 flex-1">
+        <div v-if="date.isCurrentMonth" class="flex flex-col gap-1.5 flex-1">
           <!-- Expense -->
-          <div
+          <button
             v-if="getDateExpense(date.dateString)"
             @click="clickDay(date.dateString, '支出')"
-            class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
+            class="flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs md:text-sm font-semibold text-left tabular-nums cursor-pointer focus-visible:outline-2 focus-visible:outline-green-600 transition-colors duration-150"
             :class="getExpenseClass(getDateExpense(date.dateString))"
           >
-            <ArrowUpIcon class="w-4 h-4" />
-            <span>{{ getDateExpense(date.dateString).toFixed(2) }}</span>
-          </div>
+            <ArrowUpIcon class="w-3.5 h-3.5 shrink-0 opacity-80" />
+            <span class="truncate">{{
+              getDateExpense(date.dateString).toFixed(2)
+            }}</span>
+          </button>
           <!-- Income -->
-          <div
+          <button
             v-if="getDateIncome(date.dateString)"
             @click="clickDay(date.dateString, '收入')"
-            class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md bg-green-100 dark:bg-transparent dark:border dark:border-green-800/40 text-green-700 dark:text-green-500/60 hover:bg-green-200 dark:hover:bg-green-950/20"
+            class="flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs md:text-sm font-semibold text-left tabular-nums cursor-pointer focus-visible:outline-2 focus-visible:outline-green-600 transition-colors duration-150 bg-brand-100 dark:bg-brand-900/50 text-brand-700 dark:text-brand-300 hover:bg-brand-200 dark:hover:bg-brand-900"
           >
-            <ArrowDownIcon class="w-4 h-4" />
-            <span>{{ getDateIncome(date.dateString).toFixed(2) }}</span>
-          </div>
+            <ArrowDownIcon class="w-3.5 h-3.5 shrink-0 opacity-80" />
+            <span class="truncate">{{
+              getDateIncome(date.dateString).toFixed(2)
+            }}</span>
+          </button>
         </div>
       </div>
     </div>
@@ -119,11 +146,14 @@ import { ref, computed, watch } from "vue";
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
+  ChevronDownIcon,
   PlusIcon,
   ArrowDownIcon,
   ArrowUpIcon,
   ChartBarIcon,
 } from "@heroicons/vue/24/outline";
+
+import MonthPicker from "~/components/ui/MonthPicker.vue";
 
 interface CalendarDate {
   date: Date;
@@ -139,6 +169,9 @@ interface Props {
   currentDate: Date;
   incomeData: Record<string, number>;
   expenseData: Record<string, number>;
+  // 各月份汇总（key 与页面的 dayToMonth 一致："YYYY 年 M 月"），供年月选择器展示
+  incomeMonths?: Record<string, number>;
+  expenseMonths?: Record<string, number>;
 }
 
 const props = defineProps<Props>();
@@ -216,15 +249,14 @@ const getDateExpense = (dateString: string): number => {
   return props.expenseData[dateString] || 0;
 };
 
+// 支出强度三档：实心色块 + 白字，一屏扫过去先看到颜色深浅
 const getExpenseClass = (amount: number): string => {
-  if (!amount || amount === 0) {
-    return "bg-green-100/50 dark:bg-transparent dark:border dark:border-green-800/30 text-gray-600 dark:text-green-500/50 hover:bg-green-100 dark:hover:bg-green-950/15";
-  } else if (amount >= 1000) {
-    return "bg-red-500 dark:bg-red-950/50 dark:border dark:border-red-900/40 text-white hover:bg-red-600 dark:hover:bg-red-950/60 shadow-lg";
+  if (amount >= 1000) {
+    return "bg-red-500 dark:bg-red-700 text-white hover:bg-red-600 dark:hover:bg-red-600 shadow-sm";
   } else if (amount >= 500) {
-    return "bg-orange-500 dark:bg-orange-950/50 dark:border dark:border-orange-900/40 text-white hover:bg-orange-600 dark:hover:bg-orange-950/60 shadow-lg";
+    return "bg-orange-500 dark:bg-orange-600 text-white hover:bg-orange-600 dark:hover:bg-orange-500 shadow-sm";
   } else {
-    return "bg-yellow-500 dark:bg-yellow-950/50 dark:border dark:border-yellow-900/40 text-white hover:bg-yellow-600 dark:hover:bg-yellow-950/60 shadow-lg";
+    return "bg-yellow-500 dark:bg-yellow-600 text-white hover:bg-yellow-600 dark:hover:bg-yellow-500 shadow-sm";
   }
 };
 
@@ -244,6 +276,14 @@ const nextMonth = () => {
     1
   );
   emit("month-change", currentDate.value);
+};
+
+// 月份选择器选中：任意年月一步到位
+const titleButton = ref<HTMLElement | null>(null);
+const pickerOpen = ref(false);
+const selectMonth = (date: Date) => {
+  currentDate.value = date;
+  emit("month-change", date);
 };
 
 const addFlow = (date: CalendarDate) => {

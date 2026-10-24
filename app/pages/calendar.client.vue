@@ -88,6 +88,7 @@
           <!-- Desktop Calendar -->
           <div v-if="!isMobile" class="w-full">
             <DesktopCalendar :current-date="nowDate" :income-data="inDayCount" :expense-data="outDayCount"
+              :income-months="inMonthCount" :expense-months="outMonthCount"
               @add-flow="handleDesktopAddFlow" @click-day="clickDay" @month-change="handleDesktopMonthChange"
               @show-analysis="showMonthAnalysis" />
           </div>
@@ -95,6 +96,7 @@
           <!-- Mobile Calendar -->
           <div v-else class="p-0">
             <MobileCalendar :current-date="nowDate" :income-data="inDayCount" :expense-data="outDayCount"
+              :income-months="inMonthCount" :expense-months="outMonthCount"
               @add-flow="handleMobileAddFlow" @click-day="clickDay" @month-change="handleMobileMonthChange"
               @show-analysis="showMonthAnalysis" />
           </div>
@@ -144,7 +146,7 @@
 
           <div class="p-2 md:p-4 overflow-y-auto">
             <DatasFlowTable ref="flowTableRef" :query="query" v-if="showFlowTable" @edit-item="editItem"
-              :actions="true" />
+              @updated="initQuery" :actions="true" />
           </div>
         </div>
       </div>
