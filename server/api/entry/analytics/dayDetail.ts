@@ -1,4 +1,5 @@
 import prisma from "~~/server/lib/prisma";
+import { buildFlowWhere } from "~~/server/utils/flowFilters";
 
 /**
  * @swagger
@@ -17,6 +18,10 @@ import prisma from "~~/server/lib/prisma";
  *             day: string 日期（YYYY-MM-DD）
  *             flowType: string 流水类型（可选，不传则返回全部类型）
  *             limit: number 返回条数上限（可选，默认 50）
+ *             industryType/payType/attribution: string 类目筛选（可选，
+ *               下钻弹窗里的悬浮明细要与折线的筛选一致，同 flow/page）
+ *             industryTypeList/payTypeList/attributionList: string[] 类目列表（可选）
+ *             industryTypeEmpty/payTypeEmpty/attributionEmpty: boolean 类目为空（可选）
  *     responses:
  *       200:
  *         description: 获取成功
@@ -47,13 +52,12 @@ export default defineEventHandler(async (event) => {
     return error("请选择日期");
   }
 
+  // 类目筛选与 flow/page 共用同一套语义；悬浮明细只看这一天，
+  // 所以 day 用等值覆盖掉区间条件
   const where: any = {
-    bookId: body.bookId,
+    ...buildFlowWhere(body),
     day: body.day,
   };
-  if (body.flowType) {
-    where.flowType = body.flowType;
-  }
 
   // 明细按金额倒序，即为当天的排行榜；金额相同的按 id 倒序保证顺序稳定
   const flows = await prisma.flow.findMany({

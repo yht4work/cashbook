@@ -1,6 +1,7 @@
 <template>
   <div
     class="bg-white dark:bg-gray-800 shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden rounded-lg"
+    :class="embedded ? 'flex flex-col h-full' : ''"
   >
     <!-- 查询条件显示 -->
     <div
@@ -79,11 +80,16 @@
     </div>
 
     <!-- 表格内容 -->
-    <div v-else class="flow-container">
+    <div v-else class="flow-container" :class="embedded ? 'embedded flex flex-col flex-1 min-h-0' : ''">
       <!-- 桌面端表格 -->
+      <!--
+        独立使用时按视口定高自己滚；嵌进弹窗时不定高，由外层 flex 分配
+        高度，这里只负责滚动（弹窗里只出现这一个滚动条）
+      -->
       <div
         class="hidden lg:block overflow-x-auto min-h-40"
-        :style="{ height: getTableHeight() + 'px' }"
+        :class="embedded ? 'flex-1 min-h-0' : ''"
+        :style="embedded ? undefined : { height: getTableHeight() + 'px' }"
       >
         <table class="w-full">
           <thead class="bg-gray-50 dark:bg-gray-700 sticky top-0 z-10">
@@ -93,19 +99,19 @@
                 :key="header.key"
                 class="px-3 py-2 min-w-20 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider"
                 :class="
-                  header.key === 'money'
+                  header.sortable
                     ? 'cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-600'
                     : ''
                 "
-                @click="header.key === 'money' ? toggleSort() : null"
+                @click="header.sortable ? toggleSort(header.key) : null"
               >
                 <div class="flex items-center gap-1">
                   {{ header.title }}
-                  <div v-if="header.key === 'money'" class="flex flex-col">
+                  <div v-if="header.sortable" class="flex flex-col">
                     <ChevronUpIcon
                       class="h-3 w-3"
                       :class="
-                        flowQuery.moneySort === 'asc'
+                        sortValue(header.key) === 'asc'
                           ? 'text-blue-600'
                           : 'text-gray-400'
                       "
@@ -113,7 +119,7 @@
                     <ChevronDownIcon
                       class="h-3 w-3 -mt-0.5"
                       :class="
-                        flowQuery.moneySort === 'desc'
+                        sortValue(header.key) === 'desc'
                           ? 'text-blue-600'
                           : 'text-gray-400'
                       "
@@ -249,7 +255,8 @@
       <!-- 移动端卡片 -->
       <div
         class="lg:hidden overflow-y-auto"
-        :style="{ height: getTableHeight() + 'px' }"
+        :class="embedded ? 'flex-1 min-h-0' : ''"
+        :style="embedded ? undefined : { height: getTableHeight() + 'px' }"
       >
         <div
           v-if="flowPageRef.data.length === 0"
@@ -510,7 +517,11 @@ import { Confirm } from "~/utils/confirm";
 import { doApi } from "~/utils/api";
 import { showFlowEditInvoiceDialog } from "~/utils/flag";
 
-const { query, actions = false } = defineProps(["query", "actions"]);
+const { query, actions = false, embedded = false } = defineProps([
+  "query",
+  "actions",
+  "embedded",
+]);
 // editItem：点「编辑」时把这条流水抛给父组件，由父组件打开编辑弹窗
 // updated：流水被删除/小票被修改后抛出，外层据此知道数据变了
 const emit = defineEmits(["editItem", "updated"]);
@@ -560,13 +571,17 @@ const changeTypes = () => {
   });
 };
 
-// 基础表头配置
-const baseHeaders = [
-  { title: "日期", key: "day", sortable: false },
+// 基础表头配置（金额/日期可排序；其余列只展示）
+const baseHeaders: {
+  title: string;
+  key: string;
+  sortable?: boolean;
+}[] = [
+  { title: "日期", key: "day", sortable: true },
   { title: "流水类型", key: "flowType", sortable: false },
   { title: "消费类型", key: "industryType", sortable: false },
   { title: "支付方式", key: "payType", sortable: false },
-  { title: "金额", key: "money" },
+  { title: "金额", key: "money", sortable: true },
   { title: "名称", key: "name", sortable: false },
   { title: "小票", key: "invoice", sortable: false },
   { title: "备注", key: "description", sortable: false },
@@ -647,15 +662,20 @@ const mobileFriendlyPageNumbers = computed(() => {
   );
 });
 
-// 排序切换
-const toggleSort = () => {
-  if (!flowQuery.value.moneySort) {
-    flowQuery.value.moneySort = "asc";
-  } else if (flowQuery.value.moneySort === "asc") {
-    flowQuery.value.moneySort = "desc";
-  } else {
-    flowQuery.value.moneySort = "";
-  }
+/** 某列当前的排序值（""＝默认顺序，服务端日期默认倒序） */
+const sortValue = (field: string) => {
+  const v = (flowQuery.value as any)[field + "Sort"];
+  return typeof v === "string" ? v : "";
+};
+
+// 排序切换：空 -> 升序 -> 降序 -> 空；
+// 同一时刻只保留一列的排序，切换时清掉另一列
+const toggleSort = (field: string) => {
+  const sortKey = field + "Sort";
+  const otherKey = sortKey === "moneySort" ? "daySort" : "moneySort";
+  const cur = sortValue(field);
+  (flowQuery.value as any)[sortKey] = cur === "" ? "asc" : cur === "asc" ? "desc" : "";
+  (flowQuery.value as any)[otherKey] = "";
   doQuery();
 };
 
@@ -863,6 +883,11 @@ const handleKeydown = (event: KeyboardEvent) => {
 <style scoped>
 .flow-container {
   min-height: 300px;
+}
+
+/* 嵌入弹窗模式：高度完全交给外层 flex 分配，不再兜底定高 */
+.flow-container.embedded {
+  min-height: 0;
 }
 
 /* 自定义滚动条样式 */

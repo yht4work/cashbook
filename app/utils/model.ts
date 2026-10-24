@@ -86,6 +86,7 @@ export class FlowQuery {
   attribution?: string;
   description?: string;
   moneySort?: string;
+  daySort?: string;
   // 按「该字段为空」筛选（图表下钻时，用于承载空值归并出来的那一组）
   attributionEmpty?: boolean;
   industryTypeEmpty?: boolean;

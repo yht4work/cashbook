@@ -63,6 +63,13 @@ interface Props {
   height?: string;
   startDay?: string; // 开始日期（可选），不传则查询全部
   endDay?: string; // 结束日期（可选），不传则查询全部
+  // 强制筛选条件（下钻弹窗场景）：类目/支付方式/归属等字段，
+  // 原样并入 daily 查询，趋势线只画这组筛选命中的流水
+  filter?: Record<string, any>;
+  // 嵌入下钻弹窗时禁止二次下钻：点折线本会再开一个详情弹窗，套娃无意义
+  disableDrill?: boolean;
+  // 初始选中的收支类型（下钻弹窗跟随点击柱子的类型）
+  defaultFlowType?: "支出" | "收入" | "不计收支";
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -71,16 +78,20 @@ const props = withDefaults(defineProps<Props>(), {
   height: "300px",
   startDay: undefined,
   endDay: undefined,
+  filter: undefined,
+  disableDrill: false,
+  defaultFlowType: "支出",
 });
 
 const { title, width, height } = props;
 
 // 收支切换，默认显示支出
-type FlowType = "支出" | "收入";
-const flowType = ref<FlowType>("支出");
+type FlowType = "支出" | "收入" | "不计收支";
+const flowType = ref<FlowType>(props.defaultFlowType);
 const flowTypeOptions: { value: FlowType; label: string }[] = [
   { value: "支出", label: "支出" },
   { value: "收入", label: "收入" },
+  { value: "不计收支", label: "不计收支" },
 ];
 
 // 生成唯一ID避免冲突
@@ -119,7 +130,8 @@ const formatMoney = (money?: number | null) => {
   return num.toFixed(2);
 };
 
-// 拉取某天的流水明细（按金额倒序，即当天的排行榜）
+// 拉取某天的流水明细（按金额倒序，即当天的排行榜）。
+// 下钻场景里把强制筛选一起带上，悬浮明细才和折线的筛选一致
 const loadDetail = (day: string, type: FlowType): Promise<DayDetailResult> => {
   const key = `${day}|${type}`;
   const cached = detailCache.get(key);
@@ -132,9 +144,21 @@ const loadDetail = (day: string, type: FlowType): Promise<DayDetailResult> => {
     return pending;
   }
   detailLoading.value = true;
-  const task = dayDetail({ day, flowType: type, limit: 50 })
+  // 记下请求发出时的数据版本：中途改/删了流水（版本号会加一），
+  // 这份结果再写回缓存就是过期的
+  const startedVersion = flowDataVersion.value;
+  const task = dayDetail({
+    day,
+    flowType: type,
+    limit: 50,
+    ...(props.filter || {}),
+  })
     .then((res) => {
       const result: DayDetailResult = res || { rows: [], count: 0, sum: 0 };
+      if (startedVersion !== flowDataVersion.value) {
+        // 过期结果不入缓存，也不拿来刷新悬浮层，等新版本的请求补上
+        return result;
+      }
       detailCache.set(key, result);
       return result;
     })
@@ -142,7 +166,9 @@ const loadDetail = (day: string, type: FlowType): Promise<DayDetailResult> => {
       console.error("获取当日流水明细失败:", e);
       // 失败也缓存空结果，避免鼠标每动一下就打一次接口
       const empty: DayDetailResult = { rows: [], count: 0, sum: 0 };
-      detailCache.set(key, empty);
+      if (startedVersion === flowDataVersion.value) {
+        detailCache.set(key, empty);
+      }
       return empty;
     })
     .finally(() => {
@@ -157,7 +183,10 @@ const loadDetail = (day: string, type: FlowType): Promise<DayDetailResult> => {
 const refreshTooltip = (seriesIndex?: number, dataIndex?: number) => {
   if (!lineChart) return;
   if (seriesIndex != null && dataIndex != null) {
-    // 精确重绘当前悬浮的数据点
+    // 精确重绘当前悬浮的数据点：
+    // 直接 showTip 时 ECharts 认为位置没变会跳过重绘（formatter 不会再跑），
+    // 先 hide 掉再 show，强制它用更新后的缓存重新渲染
+    lineChart.dispatchAction({ type: "hideTip" });
     lineChart.dispatchAction({
       type: "showTip",
       seriesIndex: seriesIndex,
@@ -347,12 +376,46 @@ const optionRef = ref({
 let lineDiv: any;
 let lineChart: echarts.ECharts;
 
+/**
+ * 没有数据的日期补 0 行，横轴才是完整的时间轴。
+ * 按类目筛选后，只有「该类目有流水」的日子才会出现在聚合结果里，
+ * 缺失的日期直接跳过去的话，趋势线会把 0 元的天画成连续曲线，误导趋势。
+ * 范围默认取结果首末日；外层给了 startDay/endDay 就用外层的（补全收尾的 0）。
+ */
+const zeroFill = (
+  rows: CommonChartData[],
+  startDay?: string,
+  endDay?: string
+): CommonChartData[] => {
+  if (rows.length === 0) return rows;
+  const byDay = new Map(rows.map((r) => [r.type, r]));
+  const first = startDay || rows[0].type;
+  const last = endDay || rows[rows.length - 1].type;
+  const out: CommonChartData[] = [];
+  const cur = new Date(`${first}T00:00:00`);
+  const lastDate = new Date(`${last}T00:00:00`);
+  while (out.length < 8000) {
+    if (cur > lastDate) break;
+    const key = dateFormater("YYYY-MM-dd", cur);
+    out.push(
+      byDay.get(key) || {
+        type: key,
+        inSum: 0,
+        outSum: 0,
+        zeroSum: 0,
+      }
+    );
+    cur.setDate(cur.getDate() + 1);
+  }
+  return out;
+};
+
 // 根据当前收支切换，更新图例选中状态
 const applyFlowType = () => {
   optionRef.value.legend.selected = {
     支出: flowType.value === "支出",
     收入: flowType.value === "收入",
-    不计收支: false,
+    不计收支: flowType.value === "不计收支",
   };
 };
 
@@ -363,8 +426,10 @@ onMounted(() => {
     oldInstance.dispose();
   }
   lineChart = echarts.init(lineDiv);
-  // 点折线上的数据点，下钻看那一天的流水
+  // 点折线上的数据点，下钻看那一天的流水。
+  // 嵌在下钻弹窗里时禁止（再开一层详情弹窗是套娃）
   lineChart.on("click", (param: any) => {
+    if (props.disableDrill) return;
     // param.name 是横轴日期（YYYY-MM-dd），param.seriesName 是收支类型
     const day = param.name || xAxisList[param.dataIndex];
     if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
@@ -394,6 +459,8 @@ const doQuery = async () => {
   const res = await daily({
     startDay: props.startDay,
     endDay: props.endDay,
+    // 下钻弹窗场景：把类目/归属等强制筛选原样带给聚合端点
+    ...(props.filter || {}),
   });
   // console.log(res);
   if (!res) {
@@ -413,7 +480,9 @@ const doQuery = async () => {
   dataListOut.length = 0;
   dataListIn.length = 0;
   notInOut.length = 0;
-  res.forEach((data) => {
+  // 类目筛选下，无记录的日期也占一列（补 0），趋势才不变形
+  const filled = zeroFill(res, props.startDay, props.endDay);
+  filled.forEach((data) => {
     xAxisList.push(dateFormater("YYYY-MM-dd", data.type));
     dataListOut.push(Number(data.outSum).toFixed(2));
     dataListIn.push(Number(data.inSum).toFixed(2));
@@ -443,6 +512,21 @@ watch(
       doQuery();
     }
   }
+);
+
+// 强制筛选条件变化时重新查询（下钻弹窗换条件重新打开时由 key 触发重挂载，这里兜手动变更）
+watch(
+  () => props.filter,
+  () => {
+    // 筛选变了，明细缓存也失效
+    detailCache.clear();
+    detailPromise.clear();
+    lastTooltipDay.value = "";
+    if (lineChart) {
+      doQuery();
+    }
+  },
+  { deep: true }
 );
 
 // 收支切换时更新图例选中状态；明细类型变了，缓存按新类型重新取

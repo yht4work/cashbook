@@ -1,4 +1,5 @@
 import prisma from "~~/server/lib/prisma";
+import { buildFlowWhere } from "~~/server/utils/flowFilters";
 
 /**
  * @swagger
@@ -17,6 +18,10 @@ import prisma from "~~/server/lib/prisma";
  *             flowType: string 流水类型（可选）
  *             startDay: string 开始日期（可选）
  *             endDay: string 结束日期（可选）
+ *             industryType/payType/attribution: string 类目筛选（可选，
+ *               归属配合 attributionExact 控制精确/模糊匹配，同 flow/page）
+ *             industryTypeList/payTypeList/attributionList: string[] 类目列表下钻（可选）
+ *             industryTypeEmpty/payTypeEmpty/attributionEmpty: boolean 「未知」下钻（可选）
  *     responses:
  *       200:
  *         description: 日常分析数据获取成功
@@ -35,35 +40,15 @@ import prisma from "~~/server/lib/prisma";
  *               }
  */
 export default defineEventHandler(async (event) => {
-  const { bookId, flowType, startDay, endDay } = await readBody(event); // 获取查询参数
-  if (!bookId) {
+  const body = await readBody(event); // 获取查询参数
+  if (!body.bookId) {
     return error("请先选择账本");
   }
 
-  const where: any = {
-    bookId,
-  }; // 条件查询
-
-  if (startDay && endDay) {
-    where.day = {
-      gte: startDay,
-      lte: endDay,
-    };
-  } else if (startDay) {
-    where.day = {
-      gte: startDay,
-    };
-  } else if (endDay) {
-    where.day = {
-      lte: endDay,
-    };
-  }
-
-  if (flowType) {
-    where.flowType = {
-      equals: flowType,
-    };
-  }
+  // 与明细分页共用同一套筛选语义（类目/归属/支付方式/为空/列表）：
+  // 图表下钻弹窗里的趋势线和流水列表带着同一组条件，
+  // 两边的合计才对得上
+  const where = buildFlowWhere(body);
 
   // flowType = 收入 / 支出 / 不计收支
   const dayGroups = await prisma.flow.groupBy({
