@@ -508,7 +508,7 @@ import FlowEditInvoiceDialog from "~/components/dialog/FlowEditInvoiceDialog.vue
 import { Alert } from "~/utils/alert";
 import { Confirm } from "~/utils/confirm";
 import { doApi } from "~/utils/api";
-import { showFlowEditDialog, showFlowEditInvoiceDialog } from "~/utils/flag";
+import { showFlowEditInvoiceDialog } from "~/utils/flag";
 
 const { query, actions = false } = defineProps(["query", "actions"]);
 // editItem：点「编辑」时把这条流水抛给父组件，由父组件打开编辑弹窗
@@ -519,7 +519,6 @@ const flowQuery = ref<FlowQuery>({ pageNum: 1, pageSize: 20, ...query });
 
 // 编辑相关变量
 const selectedFlow = ref<Flow | any>({});
-const dialogFormTitle = ref("修改流水");
 
 const typeLabel = ref("支出/收入类型");
 const payTypeLabel = ref("支付/收款方式");
@@ -705,13 +704,6 @@ defineExpose({
   doQuery,
   refresh: doQuery, // 暴露刷新方法
 });
-
-// 编辑流水
-const editFlow = (item: Flow) => {
-  dialogFormTitle.value = "修改流水";
-  selectedFlow.value = item;
-  showFlowEditDialog.value = true;
-};
 
 // 编辑小票
 const editTicket = (item: Flow) => {
