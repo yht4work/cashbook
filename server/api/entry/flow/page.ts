@@ -22,6 +22,9 @@ import prisma from "~~/server/lib/prisma";
  *             endDay: string 结束日期（可选）
  *             name: string 流水名称（可选，支持模糊查询）
  *             attribution: string 归属（可选，支持模糊查询）
+ *             attributionList: string[] 归属列表（可选，图表「其他」合并柱下钻）
+ *             attributionEmpty: boolean 归属为空（可选，图表「未知」下钻）
+ *             industryTypeList/payTypeList: string[] 分类列表（可选，同上）
  *             description: string 描述（可选，支持模糊查询）
  *             pageNum: number 页码（默认为1）
  *             pageSize: number 每页大小（默认为15，-1表示查询全部）
@@ -71,10 +74,14 @@ export default defineEventHandler(async (event) => {
       equals: body.flowType,
     };
   }
-  // 「该字段为空」：图表把空值归并成一组后下钻时用。
+  // 「该字段为一组值」：图表把 topN 之外的类目折成「其他」后下钻时用，
+  // 逐个精确匹配（in），可与「该字段为空」并用，空值组的明细才会一起查出来。
   // 空包含两种情况：NULL 和空字符串。Prisma 的 in 里不能放 null，
-  // 所以要用 OR 把两种情况并起来。
+  // 所以要放进 OR 把两种情况并起来。
   const orConds: any[] = [];
+  if (Array.isArray(body.industryTypeList) && body.industryTypeList.length) {
+    orConds.push({ industryType: { in: body.industryTypeList } });
+  }
   if (body.industryTypeEmpty) {
     orConds.push({ industryType: null }, { industryType: "" });
   } else if (body.industryType) {
@@ -82,12 +89,18 @@ export default defineEventHandler(async (event) => {
       equals: body.industryType,
     };
   }
+  if (Array.isArray(body.payTypeList) && body.payTypeList.length) {
+    orConds.push({ payType: { in: body.payTypeList } });
+  }
   if (body.payTypeEmpty) {
     orConds.push({ payType: null }, { payType: "" });
   } else if (body.payType) {
     where.payType = {
       equals: body.payType,
     };
+  }
+  if (Array.isArray(body.attributionList) && body.attributionList.length) {
+    orConds.push({ attribution: { in: body.attributionList } });
   }
   // 图表下钻要求精确匹配（见 attribution 的注释）
   if (body.attributionEmpty) {

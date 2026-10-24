@@ -101,34 +101,8 @@
     ></div>
   </div>
 
-  <!-- 流水表格对话框 -->
-  <div
-    v-if="showFlowTable"
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50"
-    @click="showFlowTable = false"
-  >
-    <div
-      class="w-full max-w-6xl max-h-[90vh] bg-white dark:bg-gray-800 rounded-lg shadow-xl overflow-hidden"
-      @click.stop
-    >
-      <div
-        class="flex justify-between items-center p-4 border-b border-gray-200 dark:border-gray-700"
-      >
-        <h3 class="text-lg font-semibold text-green-950 dark:text-white">
-          流水详情
-        </h3>
-        <button
-          @click="showFlowTable = false"
-          class="px-4 py-2 bg-red-600 text-white rounded-md shadow-sm hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 transition-colors"
-        >
-          关闭
-        </button>
-      </div>
-      <div class="p-2 md:p-4 overflow-y-auto max-h-[calc(90vh-80px)]">
-        <DatasFlowTable :query="query" v-if="showFlowTable" :actions="false" />
-      </div>
-    </div>
-  </div>
+  <!-- 流水详情（可直接编辑 / 删除） -->
+  <DatasFlowTableDialog v-model:visible="showFlowTable" :query="query" />
 </template>
 
 <script setup lang="ts">
@@ -138,7 +112,8 @@ import { dateFormater, miniFullscreen } from "@/utils/common";
 import { FlowTypes } from "@/utils/constant";
 import { doApi } from "@/utils/api";
 import type { CommonChartData, CommonChartQuery } from "~/utils/model";
-import DatasFlowTable from "@/components/datas/FlowTable.vue";
+import DatasFlowTableDialog from "@/components/datas/FlowTableDialog.vue";
+import { flowDataVersion } from "~/utils/flag";
 
 const { isDark } = useAppTheme();
 
@@ -305,6 +280,13 @@ const doQuery = (query: CommonChartQuery) => {
 };
 watch(chartParam.value, () => {
   doQuery(chartParam.value);
+});
+
+// 明细里改了/删了流水，图表要跟着重查，否则同一页的柱子会互相矛盾
+watch(flowDataVersion, () => {
+  if (typePieChart) {
+    doQuery(chartParam.value);
+  }
 });
 
 const query = ref<FlowQuery>({ pageNum: 1, pageSize: 20 });

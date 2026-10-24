@@ -42,6 +42,9 @@
       :style="`width: ${width}; height: ${height};`"
     ></div>
   </div>
+
+  <!-- 流水详情（可直接编辑 / 删除） -->
+  <DatasFlowTableDialog v-model:visible="showFlowTable" :query="query" />
 </template>
 
 <script setup lang="ts">
@@ -49,7 +52,9 @@ import * as echarts from "echarts";
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import { dateFormater } from "@/utils/common";
 import { daily, dayDetail } from "~/utils/apis";
-import type { DayDetailResult } from "~/utils/model";
+import type { DayDetailResult, FlowQuery } from "~/utils/model";
+import DatasFlowTableDialog from "~/components/datas/FlowTableDialog.vue";
+import { flowDataVersion } from "~/utils/flag";
 
 // 使用 props 来接收外部传入的参数
 interface Props {
@@ -90,6 +95,10 @@ const dataListIn: string[] = [];
 // 不计收支数据
 const notInOut: string[] = [];
 const noData = ref(false);
+
+// 点击折线上的某一天，下钻看那天的流水
+const query = ref<FlowQuery>({ pageNum: 1, pageSize: 20 });
+const showFlowTable = ref(false);
 
 const COLOR_OUT = "#d99f08";
 const COLOR_IN = "#4c9870";
@@ -354,6 +363,24 @@ onMounted(() => {
     oldInstance.dispose();
   }
   lineChart = echarts.init(lineDiv);
+  // 点折线上的数据点，下钻看那一天的流水
+  lineChart.on("click", (param: any) => {
+    // param.name 是横轴日期（YYYY-MM-dd），param.seriesName 是收支类型
+    const day = param.name || xAxisList[param.dataIndex];
+    if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
+    const seriesType = param.seriesName;
+    if (!seriesType) return;
+    query.value = {
+      pageNum: 1,
+      pageSize: 20,
+      startDay: day,
+      endDay: day,
+      flowType: seriesType,
+      // 下钻默认按金额倒序（可在表格里点击列头调整）
+      moneySort: "desc",
+    };
+    showFlowTable.value = true;
+  });
   applyFlowType();
   doQuery();
 });
@@ -423,6 +450,16 @@ watch(flowType, () => {
   if (lineChart) {
     applyFlowType();
     lineChart.setOption(optionRef.value, { notMerge: true });
+  }
+});
+
+// 明细里改了/删了流水，图表和悬浮明细的缓存都要更新
+watch(flowDataVersion, () => {
+  detailCache.clear();
+  detailPromise.clear();
+  lastTooltipDay.value = "";
+  if (lineChart) {
+    doQuery();
   }
 });
 </script>

@@ -29,34 +29,8 @@
     ></div>
   </div>
 
-  <!-- 流水表格对话框 -->
-  <div
-    v-if="showFlowTable"
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50"
-    @click="showFlowTable = false"
-  >
-    <div
-      class="w-full max-w-6xl max-h-[90vh] bg-white dark:bg-gray-800 rounded-lg shadow-xl overflow-hidden"
-      @click.stop
-    >
-      <div
-        class="flex justify-between items-center p-4 border-b border-gray-200 dark:border-gray-700"
-      >
-        <h3 class="text-lg font-semibold text-green-950 dark:text-white">
-          流水详情
-        </h3>
-        <button
-          @click="showFlowTable = false"
-          class="px-4 py-2 bg-red-600 text-white rounded-md shadow-sm hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 transition-colors"
-        >
-          关闭
-        </button>
-      </div>
-      <div class="p-2 md:p-4 overflow-y-auto max-h-[calc(90vh-80px)]">
-        <DatasFlowTable :query="query" v-if="showFlowTable" :actions="false" />
-      </div>
-    </div>
-  </div>
+  <!-- 流水详情（可直接编辑 / 删除） -->
+  <DatasFlowTableDialog v-model:visible="showFlowTable" :query="query" />
 </template>
 
 <script setup lang="ts">
@@ -64,7 +38,8 @@ import * as echarts from "echarts";
 import { onMounted, ref, watch } from "vue";
 import { doApi } from "~/utils/api";
 import type { CommonChartData, CommonChartQuery } from "~/utils/model";
-import DatasFlowTable from "~/components/datas/FlowTable.vue";
+import DatasFlowTableDialog from "~/components/datas/FlowTableDialog.vue";
+import { flowDataVersion } from "~/utils/flag";
 
 const { isDark } = useAppTheme();
 
@@ -101,6 +76,8 @@ const noData = ref(false);
 const topN = 12;
 const totalCount = ref(0);
 const foldedCount = ref(0);
+// 「其他」里折进来的尾部类目，点击「其他」柱子时下钻用
+const tailGroups = ref<CommonChartData[]>([]);
 
 const optionRef = ref({
   tooltip: {
@@ -210,6 +187,7 @@ const doQuery = (query: CommonChartQuery & { groupBy: string }) => {
       // 类目过多时只保留前 N 个，其余合并成「其他」
       const head = sorted.slice(0, topN);
       const tail = sorted.slice(topN);
+      tailGroups.value = tail;
       foldedCount.value = tail.length;
 
       const xAxisData: string[] = [];
@@ -287,6 +265,13 @@ watch(
   { deep: true }
 );
 
+// 明细里改了/删了流水，图表要跟着重查，否则同一页的柱子会互相矛盾
+watch(flowDataVersion, () => {
+  if (chart) {
+    doQuery(chartParam.value);
+  }
+});
+
 onMounted(() => {
   chartDiv = document.getElementById(chartId.value);
   const oldInstance = echarts.getInstanceByDom(chartDiv);
@@ -296,10 +281,25 @@ onMounted(() => {
   chart = echarts.init(chartDiv);
   chart.on("click", function (param: any) {
     const itemName = param.name || (param.data && param.data.name) || "";
-    // 「其他」是合并出来的类目，对不上具体字段，不弹明细。
-    // 用显式标记判断，不靠名字匹配：折叠项的 data name 是「其他（N 项）」，
-    // 而真实存在的类目也可能叫「其他」，用 startsWith 会误伤。
-    if (param.data && param.data.isOther) return;
+    // 「其他」是合并类目（横轴标签只是「其他」，真正的 data name 是
+    // 「其他（N 项）」，不能靠字符串判断），点开时按折进来的类目逐个精确匹配
+    if (param.data && param.data.isOther) {
+      const empty = tailGroups.value.some((d) => d.isEmpty);
+      const names = tailGroups.value
+        .filter((d) => !d.isEmpty)
+        .map((d) => d.type);
+      query.value = {
+        ...chartParam.value,
+        [props.queryField]: undefined,
+        [`${props.queryField}List`]: names,
+        [`${props.queryField}Empty`]: empty ? true : undefined,
+        attributionExact: undefined,
+        // 下钻默认按金额倒序（可在表格里点击列头调整）
+        moneySort: "desc",
+      };
+      showFlowTable.value = true;
+      return;
+    }
     // 根据queryField动态设置查询参数
     // isEmpty 为真时，说明这一类是「该字段为空」归并出来的：
     // 不能拿展示名去做 equals 匹配，否则一条都查不到
@@ -310,6 +310,8 @@ onMounted(() => {
       [`${props.queryField}Empty`]: isEmpty ? true : undefined,
       // 图上是按类目精确分组的，明细也要精确匹配，否则合计对不上
       attributionExact: props.queryField === "attribution" && !isEmpty,
+      // 下钻默认按金额倒序（可在表格里点击列头调整）
+      moneySort: "desc",
     };
     showFlowTable.value = true;
   });

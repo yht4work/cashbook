@@ -26,16 +26,34 @@
           {{ flowQuery.flowType }}
         </span>
         <span
+          v-if="industryTypeListQuery"
+          class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"
+        >
+          类型: 其他（{{ industryTypeListQuery.length }} 项）
+        </span>
+        <span
           v-if="flowQuery.industryType"
           class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"
         >
           {{ flowQuery.industryType }}
         </span>
         <span
+          v-if="payTypeListQuery"
+          class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400"
+        >
+          支付方式: 其他（{{ payTypeListQuery.length }} 项）
+        </span>
+        <span
           v-if="flowQuery.payType"
           class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400"
         >
           {{ flowQuery.payType }}
+        </span>
+        <span
+          v-if="attributionListQuery"
+          class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300"
+        >
+          归属: 其他（{{ attributionListQuery.length }} 项）
         </span>
         <span
           v-if="flowQuery.attribution || flowQuery.attributionEmpty"
@@ -201,7 +219,7 @@
               >
                 <div class="flex gap-2">
                   <button
-                    @click="$emit('editItem', item)"
+                    @click="emit('editItem', item)"
                     class="text-blue-600 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300 p-1 rounded hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
                     title="编辑"
                   >
@@ -326,7 +344,7 @@
               class="flex items-center justify-end gap-2 mt-2"
             >
               <button
-                @click="$emit('editItem', item)"
+                @click="emit('editItem', item)"
                 class="p-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
                 title="编辑"
               >
@@ -453,7 +471,7 @@
   <FlowEditInvoiceDialog
     v-if="showFlowEditInvoiceDialog"
     :item="selectedFlow"
-    :success-callback="doQuery"
+    :success-callback="onInvoiceSaved"
   />
 
   <!-- 图片蒙版 -->
@@ -493,6 +511,9 @@ import { doApi } from "~/utils/api";
 import { showFlowEditDialog, showFlowEditInvoiceDialog } from "~/utils/flag";
 
 const { query, actions = false } = defineProps(["query", "actions"]);
+// editItem：点「编辑」时把这条流水抛给父组件，由父组件打开编辑弹窗
+// updated：流水被删除/小票被修改后抛出，外层据此知道数据变了
+const emit = defineEmits(["editItem", "updated"]);
 
 const flowQuery = ref<FlowQuery>({ pageNum: 1, pageSize: 20, ...query });
 
@@ -581,6 +602,26 @@ const totalPages = computed(() =>
   Math.ceil((flowPageRef.value?.total || 0) / (flowQuery.value.pageSize || 20))
 );
 
+// 下钻「其他」合并柱时传进来的类目列表（展示用）
+const industryTypeListQuery = computed(
+  (): string[] | undefined => {
+    const list: any = (flowQuery.value as any).industryTypeList;
+    return Array.isArray(list) && list.length ? list : undefined;
+  }
+);
+const payTypeListQuery = computed(
+  (): string[] | undefined => {
+    const list: any = (flowQuery.value as any).payTypeList;
+    return Array.isArray(list) && list.length ? list : undefined;
+  }
+);
+const attributionListQuery = computed(
+  (): string[] | undefined => {
+    const list: any = (flowQuery.value as any).attributionList;
+    return Array.isArray(list) && list.length ? list : undefined;
+  }
+);
+
 const hasFilters = computed(() => {
   return !!(
     flowQuery.value.startDay ||
@@ -591,7 +632,10 @@ const hasFilters = computed(() => {
     flowQuery.value.attribution ||
     flowQuery.value.attributionEmpty ||
     flowQuery.value.industryTypeEmpty ||
-    flowQuery.value.payTypeEmpty
+    flowQuery.value.payTypeEmpty ||
+    industryTypeListQuery.value ||
+    payTypeListQuery.value ||
+    attributionListQuery.value
   );
 });
 
@@ -675,6 +719,12 @@ const editTicket = (item: Flow) => {
   showFlowEditInvoiceDialog.value = true;
 };
 
+// 小票保存成功后，除了刷新表格，还要告诉外层「数据变了」
+const onInvoiceSaved = () => {
+  doQuery();
+  emit("updated");
+};
+
 // 删除流水
 const deleteFlow = (item: Flow) => {
   if (!item.id) {
@@ -693,6 +743,8 @@ const deleteFlow = (item: Flow) => {
         .then(() => {
           Alert.success("删除成功");
           doQuery();
+          // 通知外层：数据变了，外面的图表要跟着重查
+          emit("updated");
         })
         .catch(() => {
           Alert.error("删除失败");

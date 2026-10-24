@@ -90,6 +90,10 @@ export class FlowQuery {
   attributionEmpty?: boolean;
   industryTypeEmpty?: boolean;
   payTypeEmpty?: boolean;
+  // 按「一组该字段的值」筛选（图表下钻"其他"合并柱时用，逐个精确匹配）
+  attributionList?: string[];
+  industryTypeList?: string[];
+  payTypeList?: string[];
   // 精确匹配（图表下钻时用；搜索框输入则走模糊匹配）
   attributionExact?: boolean;
 }

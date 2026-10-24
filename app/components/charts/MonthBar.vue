@@ -44,40 +44,16 @@
     ></div>
   </div>
 
-  <!-- 流水表格对话框 -->
-  <div
-    v-if="showFlowTable"
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50"
-    @click="showFlowTable = false"
-  >
-    <div
-      class="w-full max-w-6xl max-h-[90vh] bg-white dark:bg-gray-800 rounded-lg shadow-xl overflow-hidden"
-      @click.stop
-    >
-      <div
-        class="flex justify-between items-center p-4 border-b border-gray-200 dark:border-gray-700"
-      >
-        <h3 class="text-lg font-semibold text-green-950 dark:text-white">
-          流水详情
-        </h3>
-        <button
-          @click="showFlowTable = false"
-          class="px-4 py-2 bg-red-600 text-white rounded-md shadow-sm hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 transition-colors"
-        >
-          关闭
-        </button>
-      </div>
-      <div class="p-2 md:p-4 overflow-y-auto max-h-[calc(90vh-80px)]">
-        <DatasFlowTable :query="query" v-if="showFlowTable" :actions="false" />
-      </div>
-    </div>
-  </div>
+  <!-- 流水详情（可直接编辑 / 删除） -->
+  <DatasFlowTableDialog v-model:visible="showFlowTable" :query="query" />
 </template>
 
 <script setup lang="ts">
 import * as echarts from "echarts";
 import { onMounted, ref, watch } from "vue";
 import type { CommonChartData } from "~/utils/model";
+import DatasFlowTableDialog from "~/components/datas/FlowTableDialog.vue";
+import { flowDataVersion } from "~/utils/flag";
 
 // 使用 props 来接收外部传入的参数
 interface Props {
@@ -399,7 +375,11 @@ onMounted(() => {
     const lastDay = new Date(Number(year), Number(month), 0).getDate();
     query.value.startDay = `${yearMonth}-01`;
     query.value.endDay = `${yearMonth}-${String(lastDay).padStart(2, "0")}`;
-    query.value.flowType = flowType.value;
+    // 点的是哪根柱子就查哪个类型（支出 / 收入 / 不计收支），
+    // 不能用顶部的收支切换兜底：勾选"不计收支"图例后点灰柱会误查成支出
+    query.value.flowType = param.seriesName || flowType.value;
+    // 下钻默认按金额倒序（可在表格里点击列头调整）
+    query.value.moneySort = "desc";
     showFlowTable.value = true;
   });
   doQuery();
@@ -419,6 +399,13 @@ watch(
 watch(flowType, () => {
   if (chart) {
     renderChart();
+  }
+});
+
+// 明细里改了/删了流水，图表要跟着重查，否则同一页的柱子会互相矛盾
+watch(flowDataVersion, () => {
+  if (chart) {
+    doQuery();
   }
 });
 </script>
