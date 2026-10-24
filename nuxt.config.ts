@@ -127,6 +127,12 @@ export default defineNuxtConfig({
     // 使用根目录的 tailwind.config.js 文件
   },
   vite: {
+    server: {
+      // 本机部署域名白名单：在 .env 里配 NUXT_VITE_ALLOWED_HOSTS（逗号分隔），
+      // 没配则保持 Vite 默认行为
+      allowedHosts:
+        (process.env.NUXT_VITE_ALLOWED_HOSTS || "").split(",").filter(Boolean),
+    },
     resolve: {
       alias: {
         ".prisma/client/index-browser":
