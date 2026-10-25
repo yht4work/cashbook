@@ -420,6 +420,7 @@ export const useChatStore = defineStore("chat", {
       );
       // push 后从数组取回 reactive 代理：后续按代理逐帧修改才能触发视图更新
       const streamRow = this.messages[this.messages.length - 1];
+      const userRow = this.messages[this.messages.length - 2];
       this.streaming = true;
       const ctx = { flowCards: null as DraftFlow[] | null };
       let finished = false;
@@ -463,6 +464,20 @@ export const useChatStore = defineStore("chat", {
           await this.loadMessages(sessionId);
         }
         await this.loadSessions();
+        // 顺手修：回收本轮待发行 pendingImages 的 blob URL。发送收尾后
+        // 气泡缩略图一律由 loadMessages 的服务端行接管（show 接口地址），
+        // 这些 blob 不再被引用；已切走会话时回看同样走 loadMessages 替换。
+        if (userRow) {
+          const blobs = userRow.pendingImages ?? [];
+          userRow.pendingImages = undefined;
+          for (const u of blobs) {
+            try {
+              URL.revokeObjectURL(u);
+            } catch {
+              // 已失效，忽略
+            }
+          }
+        }
       }
     },
 

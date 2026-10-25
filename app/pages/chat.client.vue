@@ -6,12 +6,16 @@ import {
   ChevronRightIcon,
 } from "@heroicons/vue/24/outline";
 import ChatSessionsPanel from "~/components/chat/ChatSessionsPanel.vue";
+import ChatMsgList from "~/components/chat/ChatMsgList.vue";
+import ChatComposer from "~/components/chat/ChatComposer.vue";
 import { useChatStore } from "~/utils/chatStore";
 
 /**
- * AI 记账页壳（Task 7）：桌面双栏（左会话栏可收起 + 右消息区），
- * 移动会话栏为抽屉。消息流/输入区/卡片由 Task 8/9 填进右列的消息区；
- * 本任务右侧先放空态引导文案。
+ * AI 记账页（Task 7 壳 + Task 8 消息流/输入区）：桌面双栏（左会话栏可收起 +
+ * 右消息区），移动会话栏为抽屉。消息区 = ChatMsgList（滚动流）+ ChatComposer
+ * （输入区）+ 空态引导；卡片（ChatDraftCard）由 Task 9 挂进 ChatMsgItem。
+ * 注：layout 的 main 为 relative 且 slotted 包裹层无固定高，页面根用
+ * absolute inset-0 撑满（h-full 链在自动高度父级上会断）。
  */
 definePageMeta({
   layout: "public",
@@ -70,7 +74,9 @@ const titleOf = (): string => {
 </script>
 
 <template>
-  <div class="h-full flex overflow-hidden bg-surface-muted dark:bg-surface-dark">
+  <div
+    class="absolute inset-0 flex overflow-hidden bg-surface-muted pb-4 lg:pb-0 dark:bg-surface-dark"
+  >
     <!-- 桌面：左会话栏（可收起） -->
     <div
       v-if="!isMobile"
@@ -147,11 +153,12 @@ const titleOf = (): string => {
         </button>
       </div>
 
-      <!-- 消息区：Task 8 / 9 在这里接入消息流与输入区；当前为空态引导 -->
-      <section id="chat-msg-area" class="flex-1 min-h-0 overflow-y-auto">
+      <!-- 消息区：消息流（Task 8）+ 输入区（Task 8）+ 空态引导；卡片 Task 9 挂进 ChatMsgItem -->
+      <section id="chat-msg-area" class="flex flex-1 min-h-0 flex-col overflow-hidden">
+        <!-- 空态引导（未选会话 / 空会话仍显示） -->
         <div
           v-if="!store.currentId || store.currentMessages.length === 0"
-          class="h-full flex flex-col items-center justify-center px-6 py-10 text-center"
+          class="flex min-h-0 flex-1 flex-col items-center justify-center px-6 py-10 text-center"
         >
           <div
             class="w-16 h-16 rounded-full bg-brand-100 dark:bg-brand-900 flex items-center justify-center mb-4"
@@ -174,6 +181,10 @@ const titleOf = (): string => {
             新建会话
           </button>
         </div>
+        <!-- 消息流（滚动 + 自动跟随，见组件注释） -->
+        <ChatMsgList v-else />
+        <!-- 输入区（Enter 发送 / 选图预览 / streaming 锁定） -->
+        <ChatComposer />
       </section>
     </section>
   </div>
