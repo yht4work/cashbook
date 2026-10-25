@@ -110,3 +110,37 @@ model TypeRelation {
   source String
   target String
 }
+
+model ChatSession {
+  id         Int       @id @default(autoincrement())
+  userId     Int
+  title      String?
+  createDate DateTime  @default(now())
+  updateDate DateTime  @default(now())
+  messages   ChatMessage[]
+}
+
+model ChatMessage {
+  id         Int         @id @default(autoincrement())
+  sessionId  Int
+  userId     Int
+  role       String      // "user" | "assistant"
+  content    String?     // 文本部分
+  images     String?     // 逗号分隔文件名（user 消息）
+  flows      String?     // 序列化的流水草稿数组 JSON（assistant 消息），每项:
+                         // {day,flowType,industryType,payType,money,name,
+                         //  description,attribution,invoices:string[],
+                         //  imageIdx?:int[], flowId?:int}
+                         // invoices=小票文件名（最终以用户在卡片上的增删为准）；
+                         // imageIdx=AI 对来源图的序号（仅预填用，服务端映射成文件名）；
+                         // flowId=该卡入账后由 chat/save 写回的 Flow.id
+  status     Int?        // assistant 消息状态：
+                         //   0 = 正常（含纯文字回复、或卡片尚有未入账）
+                         //  -1 = 生成/解析失败（content 为错误文案）
+                         //   1 = 该消息所有卡片均已入账（派生：每卡均有 flowId）
+  createDate DateTime    @default(now())
+
+  session    ChatSession @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId, id])
+}

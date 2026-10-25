@@ -81,3 +81,13 @@ export type FixedFlow = Prisma.FixedFlowModel
  * 
  */
 export type TypeRelation = Prisma.TypeRelationModel
+/**
+ * Model ChatSession
+ * 
+ */
+export type ChatSession = Prisma.ChatSessionModel
+/**
+ * Model ChatMessage
+ * 
+ */
+export type ChatMessage = Prisma.ChatMessageModel
