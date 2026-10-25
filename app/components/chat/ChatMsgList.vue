@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { onMounted, ref, watch } from "vue";
 import ChatMsgItem from "~/components/chat/ChatMsgItem.vue";
 import { useChatStore } from "~/utils/chatStore";
 
@@ -10,7 +10,9 @@ import { useChatStore } from "~/utils/chatStore";
  * 自动跟随策略（简单实现）：
  * - 「吸底」= 距底 ≤ 48px；scroll 时更新（用户上翻即脱离吸底，不再抢滚动）；
  * - 新内容（新行 / 流式 delta 增长 / 卡片挂回 / 会话切换）在吸底态滚到底；
- * - 切换会话强制恢复吸底。
+ * - 切换会话强制恢复吸底；
+ * - 首次挂载（空态切出消息流、首条消息乐观行进来的路径）滚到底——这些路径
+ *   不触发 watch（挂载时初始值已被记录为「当前值」），必须有 onMounted。
  */
 const store = useChatStore();
 
@@ -32,6 +34,8 @@ const toBottom = (): void => {
     el.scrollTop = el.scrollHeight;
   }
 };
+
+onMounted(toBottom);
 
 let prevId = store.currentId;
 

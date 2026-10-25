@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { PaperAirplaneIcon, PhotoIcon, XMarkIcon } from "@heroicons/vue/24/outline";
 import { useChatStore } from "~/utils/chatStore";
+import { Alert } from "~/utils/alert";
 
 /**
  * 输入区（Task 8）：textarea（Enter 发送 / Shift+Enter 换行，IME 组合输入时
@@ -70,10 +71,18 @@ const clearPendings = (): void => {
   pendings.value = [];
 };
 
+/** 图片判定：image/* MIME，或常见小票图片扩展名兜底（部分设备不给 MIME） */
+const IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|heic|heif|avif)$/i;
+const isImageFile = (f: File): boolean =>
+  String(f.type || "").startsWith("image/") || IMG_EXT_RE.test(String(f.name || ""));
+
 const addFiles = (fl: FileList | null): void => {
-  const list = Array.from(fl ?? []).filter(
-    (f) => String(f.type || "").startsWith("image/") || String(f.name || "").trim()
-  );
+  const list = Array.from(fl ?? []).filter(isImageFile);
+  const dropped = (fl ? fl.length : 0) - list.length;
+  if (dropped > 0) {
+    // 非图片（不满足 accept 意图）整批复核后丢弃，一次提示不刷屏
+    Alert.warning(`已忽略 ${dropped} 个非图片文件`);
+  }
   for (const f of list) {
     pendings.value.push({ file: f, url: URL.createObjectURL(f) });
   }
@@ -165,17 +174,19 @@ watch(text, () => {
         @click="fileInput?.click()"
       >
         <PhotoIcon class="h-6 w-6" />
-        <input
-          ref="fileInput"
-          type="file"
-          accept="image/*"
-          multiple
-          class="hidden"
-          aria-hidden="true"
-          tabindex="-1"
-          @change="addFiles($event.target.files)"
-        />
       </button>
+      <!-- 注意：file input 必须在按钮外（同级）——放进按钮内时 input 的合成
+           click 会冒泡回按钮再触发一次点击处理器（重复弹 picker 的再入隐患） -->
+      <input
+        ref="fileInput"
+        type="file"
+        accept="image/*"
+        multiple
+        class="hidden"
+        aria-hidden="true"
+        tabindex="-1"
+        @change="addFiles($event.target.files)"
+      />
 
       <textarea
         ref="taEl"
