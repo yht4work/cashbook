@@ -4,6 +4,7 @@ import {
   ChartBarIcon,
   ExclamationTriangleIcon,
   BanknotesIcon,
+  ChatBubbleLeftRightIcon,
   CurrencyDollarIcon,
   BookOpenIcon,
   Squares2X2Icon,
@@ -54,6 +55,12 @@ const items: Menu[] = [
     title: "流水管理",
     path: "flows",
     icon: CurrencyDollarIcon,
+    color: "text-brand-500",
+  },
+  {
+    title: "AI 记账",
+    path: "chat",
+    icon: ChatBubbleLeftRightIcon,
     color: "text-brand-500",
   },
   {

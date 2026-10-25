@@ -3,8 +3,8 @@ import {
   CalendarDaysIcon,
   ChartBarIcon,
   ExclamationTriangleIcon,
+  ChatBubbleLeftRightIcon,
   CurrencyDollarIcon,
-  BookOpenIcon,
 } from "@heroicons/vue/24/outline";
 
 interface NavItem {
@@ -49,9 +49,9 @@ const bottomNavItems: NavItem[] = [
     color: "text-brand-500",
   },
   {
-    title: "账本",
-    path: "books",
-    icon: BookOpenIcon,
+    title: "AI 记账",
+    path: "chat",
+    icon: ChatBubbleLeftRightIcon,
     color: "text-brand-500",
   },
 ];
