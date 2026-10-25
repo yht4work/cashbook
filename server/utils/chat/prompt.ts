@@ -17,12 +17,19 @@ export const buildSystemPrompt = (c: {
   const candLine = (label: string, values: string[]) =>
     `  ${label}：${values.length ? values.join("、") : "（暂无可选）"}`;
 
-  // 图片编号规则：编号与 history.buildOllamaMessages 的占号规则对齐
-  //（整次调用按出现顺序连续编号，真传与否都占一个号）
+  // 图片编号规则：编号与 history.buildImageNumbering 的占号规则对齐
+  //（整次调用全局连续占号，真传与否都占号）；调用方的 imageCount 就该传
+  // buildImageNumbering(turns).length —— 见 tests/chat/consistency.test.ts。
   const imageRule =
     c.imageCount > 0
-      ? `本对话共提供 ${c.imageCount} 张图片，按出现顺序编号为 图1…图${c.imageCount}；从图片里解析出的流水，把来源图的编号填进 imageIdx（数组，可多个，如 [1] 或 [1,2]）；确定不了来源图的卡片就省略 imageIdx（服务端会把该消息的图都挂上，用户在卡片上可增删）。`
+      ? `本对话共提供 ${c.imageCount} 张图，按出现顺序编号为 图1…图${c.imageCount}（编号全局连续，含已省略的历史图）；从图片里解析出的流水把来源图编号填进 imageIdx（数组，可多个，如 [1] 或 [1,2]）；未标来源（imageIdx）的卡片默认挂本次消息的图，由用户在卡片上增删。`
       : "本对话没有图片，所有卡片都省略 imageIdx。";
+
+  // 输出示例按分支生成、day 用 today：写死的示例会在日期/图文分支上误导
+  const cardExample =
+    c.imageCount > 0
+      ? `{"day":"${c.today}","flowType":"支出","industryType":"","payType":"","money":35,"name":"午饭","description":"","attribution":"","imageIdx":[1]}`
+      : `{"day":"${c.today}","flowType":"支出","industryType":"","payType":"","money":35,"name":"午饭","description":"","attribution":""}`;
 
   return [
     "你是记账助手。任务：从用户最新一条消息（文字与附图）里提取出记账流水，最终只输出一个 JSON 数组，数组每个元素是一张流水卡片。",
@@ -37,7 +44,7 @@ export const buildSystemPrompt = (c: {
     "",
     imageRule,
     "",
-    '输出格式：只输出 JSON 数组本身，不要 markdown 围栏、不要任何解释，形如 [{"day":"2026-10-25","flowType":"支出","industryType":"","payType":"","money":35,"name":"午饭","description":"","attribution":"","imageIdx":[1]}]。',
+    `输出格式：只输出 JSON 数组本身，不要 markdown 围栏、不要任何解释，形如 [${cardExample}]。`,
   ].join("\n");
 };
 

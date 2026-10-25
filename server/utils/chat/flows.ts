@@ -4,8 +4,10 @@
  * - extractFlowArray：从模型回复正文里挖出 JSON 数组（容忍 markdown 围栏
  *   与前后闲话），取不到返回 null 由调用方按「解析失败」落库。
  * - normalizeFlows：把数组里每个元素归一成 DraftFlow —— 类型不落在账本
- *   候选里就置 ""；day 必须 YYYY-MM-DD 否则用 dayFallback；imageIdx 由
- *   调用方给的 imageNameOf 回调映射成小票文件名（AI 的编号只是预填用）。
+ *   候选里就置 ""；day 必须 YYYY-MM-DD 否则用 dayFallback；图片由调用方
+ *   给的 ImageLookup 注入：imageIdx 缺省 → default()（本次消息的图），
+ *   AI 标了 imageIdx → byIndex() 按 buildImageNumbering 的全局编号解析成
+ *   小票文件名（AI 的编号只是预填用）。
  */
 
 export type DraftFlow = {
@@ -21,10 +23,22 @@ export type DraftFlow = {
   flowId?: number;
 };
 
+/** 流水卡片的图片来源注入（send 场景由组装上下文的一方接线） */
+export type ImageLookup = {
+  /** 没标 imageIdx 的卡片默认挂的图 = 本次消息的图（文件名，直接给） */
+  default: () => string[];
+  /** 图编号 → 文件名；编号必须来自 buildImageNumbering 的全局连续表 */
+  byIndex: (i: number) => string | null;
+};
+
 /**
  * 从回复正文里取第一个能完整解析成 JSON 数组的片段：
  * 遇到 JSON.parse 失败的括号段就跳过继续找下一个 `[`；
  * 字符串内部的 [ ] 不干扰配对。没有数组或括号没闭合 → null。
+ *
+ * 注意：这里不做记账语义判断，「首个能解析的数组」就是结果——闲话里
+ * 若先出现一个可解析的短数组会抢位；这由 prompt 兜住（已要求模型
+ * 只输出数组本身），出现双数组时按先后取首个是既定口径。
  */
 export const extractFlowArray = (text: string): unknown[] | null => {
   for (let start = text.indexOf("["); start !== -1; start = text.indexOf("[", start + 1)) {
@@ -101,7 +115,7 @@ const moneyOf = (v: unknown): number => {
 
 const textOf = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 
-/** 候选必须精确命中才通过，否则置 ""——AI 编造的类型名绝不入库 */
+/** 候选必须精确命中（trim 后）才通过，否则置 ""——AI 编造的类型名绝不入库 */
 const pickFrom = (list: string[], v: unknown): string => {
   const t = textOf(v);
   return t && list.includes(t) ? t : "";
@@ -126,23 +140,8 @@ export const normalizeFlows = (
   raw: unknown[],
   cand: { industry: string[]; pay: string[]; attribution: string[] },
   dayFallback: string,
-  imageNameOf: (idx: number) => string | null
+  img: ImageLookup
 ): DraftFlow[] => {
-  // 「该消息全部图」兜底：对编号从 1 连续查到第一个 null 为止。
-  // 调用方（send 场景）必须保证编号从 1 开始连续——buildOllamaMessages
-  // 的占号规则即如此。
-  const allImages = (): string[] => {
-    const got: string[] = [];
-    for (let i = 1; i <= 64; i++) {
-      const f = imageNameOf(i);
-      if (!f) {
-        break;
-      }
-      got.push(f);
-    }
-    return got;
-  };
-
   const out: DraftFlow[] = [];
   for (const item of raw) {
     if (!item || typeof item !== "object" || Array.isArray(item)) {
@@ -150,14 +149,15 @@ export const normalizeFlows = (
     }
     const c = item as Record<string, unknown>;
     const idxs = imageIdxOf(c.imageIdx);
-    // 逐张映射，映射不上的那张缺省；AI 明确引了编号但没有一张能
-    // 映射上时不兜底全部图（说明这卡的图不可信，留空由用户自己挂）
+    // AI 标了编号：逐张映射，映射不上的那张缺省；一张都对不上时不再
+    // 回落 default（编造编号不可信，留空由用户自己挂）。缺省 → 本次
+    // 消息的图（default 注入，别的轮的小票不搭便车）。
     const invoices = idxs
-      ? [...new Set(idxs.map((i) => imageNameOf(i)).filter((f): f is string => !!f))]
-      : allImages();
+      ? [...new Set(idxs.map((i) => img.byIndex(i)).filter((f): f is string => !!f))]
+      : img.default();
     out.push({
       day: dayOf(c.day, dayFallback),
-      flowType: FLOW_TYPES.includes(c.flowType as string) ? (c.flowType as string) : "支出",
+      flowType: FLOW_TYPES.includes(textOf(c.flowType)) ? (textOf(c.flowType) as string) : "支出",
       industryType: pickFrom(cand.industry, c.industryType),
       payType: pickFrom(cand.pay, c.payType),
       money: moneyOf(c.money),

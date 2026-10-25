@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractFlowArray, normalizeFlows } from "~~/server/utils/chat/flows";
+import { extractFlowArray, normalizeFlows, type ImageLookup } from "~~/server/utils/chat/flows";
 
 const cand = {
   industry: ["餐饮", "零食"],
@@ -7,6 +7,12 @@ const cand = {
   attribution: ["家里", "公司"],
 };
 const FALLBACK = "2026-10-25";
+
+/** 测试接线：byIndex 给编号→文件名映射；current=「本次消息的图」（default） */
+const imgOf = (byIndex: (i: number) => string | null, current: string[] = []): ImageLookup => ({
+  default: () => current,
+  byIndex,
+});
 
 describe("extractFlowArray", () => {
   it("裸 JSON 数组直接取出", () => {
@@ -53,7 +59,7 @@ describe("normalizeFlows", () => {
       }],
       cand,
       FALLBACK,
-      (i) => `图${i}号文件.png`
+      imgOf((i) => `图${i}号文件.png`)
     );
     expect(out).toEqual([{
       day: "2026-10-24",
@@ -72,18 +78,18 @@ describe("normalizeFlows", () => {
     ]);
   });
 
-  it("flowType 缺省/非法 → 支出；合法的「收入」保留", () => {
+  it("flowType 缺省/非法 → 支出；合法「收入」保留（前后空白 trim 后可匹配）", () => {
     const out = normalizeFlows(
-      [{ name: "a" }, { name: "b", flowType: "伙食" }, { name: "c", flowType: "收入" }],
+      [{ name: "a" }, { name: "b", flowType: "伙食" }, { name: "c", flowType: "收入" }, { name: "d", flowType: " 收入 " }],
       cand,
       FALLBACK,
-      () => null
+      imgOf(() => null)
     );
-    expect(out.map((f) => f.flowType)).toEqual(["支出", "支出", "收入"]);
+    expect(out.map((f) => f.flowType)).toEqual(["支出", "支出", "收入", "收入"]);
   });
 
   it("name 缺失 / 空白 → 未命名流水", () => {
-    const out = normalizeFlows([{}, { name: "   " }], cand, FALLBACK, () => null);
+    const out = normalizeFlows([{}, { name: "   " }], cand, FALLBACK, imgOf(() => null));
     expect(out.map((f) => f.name)).toEqual(["未命名流水", "未命名流水"]);
   });
 
@@ -92,19 +98,19 @@ describe("normalizeFlows", () => {
       [{ name: "a", day: "昨天" }, { name: "b", day: "2026-02-30" }, { name: "c", day: FALLBACK }],
       cand,
       FALLBACK,
-      () => null
+      imgOf(() => null)
     );
     expect(out.map((f) => f.day)).toEqual([FALLBACK, FALLBACK, FALLBACK]);
   });
 
-  it("money 归一成数字：字符串可转、坏值归 0", () => {
+  it("money 归一成数字：字符串可转、坏值与负数归 0", () => {
     const out = normalizeFlows(
-      [{ name: "a", money: "35" }, { name: "b", money: "abc" }, { name: "c" }],
+      [{ name: "a", money: "35" }, { name: "b", money: "abc" }, { name: "c" }, { name: "d", money: -3 }],
       cand,
       FALLBACK,
-      () => null
+      imgOf(() => null)
     );
-    expect(out.map((f) => f.money)).toEqual([35, 0, 0]);
+    expect(out.map((f) => f.money)).toEqual([35, 0, 0, 0]);
   });
 
   it("类型候选不匹配 / 缺失 → 置空串；前后空白的合法值可匹配", () => {
@@ -112,7 +118,7 @@ describe("normalizeFlows", () => {
       [{ name: "a", industryType: "编造出来的", payType: " 微信 ", attribution: "公司" }],
       cand,
       FALLBACK,
-      () => null
+      imgOf(() => null)
     );
     expect(out[0].industryType).toBe("");
     expect(out[0].payType).toBe("微信");
@@ -124,7 +130,7 @@ describe("normalizeFlows", () => {
       [{ name: "a", imageIdx: [1, 2, 3] }],
       cand,
       FALLBACK,
-      (i) => (i === 2 ? "b.png" : null)
+      imgOf((i) => (i === 2 ? "b.png" : null))
     );
     expect(out[0].invoices).toEqual(["b.png"]);
   });
@@ -134,19 +140,24 @@ describe("normalizeFlows", () => {
       [{ name: "a", imageIdx: 2 }, { name: "b", imageIdx: [2, 2] }],
       cand,
       FALLBACK,
-      (i) => (i === 2 ? "b.png" : null)
+      imgOf((i) => (i === 2 ? "b.png" : null))
     );
     expect(out[0].invoices).toEqual(["b.png"]);
     expect(out[1].invoices).toEqual(["b.png"]);
   });
 
-  it("imageIdx 缺省 → invoices 是该消息全部图（对回调从 1 连续查到 null 为止）", () => {
-    const out = normalizeFlows([{}], cand, FALLBACK, (i) => (i <= 3 ? `f${i}.png` : null));
-    expect(out[0].invoices).toEqual(["f1.png", "f2.png", "f3.png"]);
+  it("imageIdx 缺省 → invoices=本次消息的图（default 注入，不再探查别的轮的图）", () => {
+    const out = normalizeFlows([{}], cand, FALLBACK, imgOf(() => null, ["f1.png", "f2.png"]));
+    expect(out[0].invoices).toEqual(["f1.png", "f2.png"]);
   });
 
-  it("imageIdx 引用了不存在的编号且整张卡无一张能映射 → invoices 空，不再兜底全部图", () => {
-    const out = normalizeFlows([{ name: "a", imageIdx: [9] }], cand, FALLBACK, (i) => (i <= 3 ? `f${i}.png` : null));
+  it("imageIdx 缺省且本次消息无图 → invoices 空", () => {
+    const out = normalizeFlows([{}], cand, FALLBACK, imgOf(() => null));
+    expect(out[0].invoices).toEqual([]);
+  });
+
+  it("imageIdx 引用了不存在的编号且整卡无一张能映射 → invoices 空，不回落 default", () => {
+    const out = normalizeFlows([{ name: "a", imageIdx: [9] }], cand, FALLBACK, imgOf(() => null, ["cur.png"]));
     expect(out[0].invoices).toEqual([]);
   });
 
@@ -155,7 +166,7 @@ describe("normalizeFlows", () => {
       [null, "foo", 42, { name: "午饭", money: 35 }],
       cand,
       FALLBACK,
-      () => null
+      imgOf(() => null)
     );
     expect(out).toEqual([{
       day: FALLBACK,

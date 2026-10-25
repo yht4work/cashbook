@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { buildOllamaMessages, type ChatTurn } from "../../server/utils/chat/history";
+import { buildImageNumbering, buildOllamaMessages, type ChatTurn } from "../../server/utils/chat/history";
 
 const SYS = "SYS PROMPT";
 const opts = { imageTurnLimit: 3, imageTotalLimit: 6 };
@@ -121,5 +121,19 @@ describe("buildOllamaMessages", () => {
     ]);
     expect("images" in out[1]).toBe(false);
     expect("images" in out[0]).toBe(false);
+  });
+});
+
+describe("buildImageNumbering", () => {
+  it("编号表按出现顺序全量占号（占位图也占号），与真传窗口无关", () => {
+    const turns: ChatTurn[] = [
+      ut("a", ["a1.png", "a2.png"]),
+      at("回复"),
+      ut("b", ["b1.png"]),
+    ];
+    const wide = buildImageNumbering(turns, opts);
+    const narrow = buildImageNumbering(turns, { imageTurnLimit: 1, imageTotalLimit: 1 });
+    expect(wide).toEqual(["a1.png", "a2.png", "b1.png"]);
+    expect(narrow).toEqual(wide); // 占号只按出现顺序，不随窗口变化
   });
 });

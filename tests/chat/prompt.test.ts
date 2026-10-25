@@ -25,12 +25,23 @@ describe("buildSystemPrompt", () => {
     expect(p).toContain("禁止");
   });
 
-  it("注入 today、imageIdx 编号规则与图片总数", () => {
+  it("注入 today、imageIdx 编号规则与图片总数；缺省挂图口径与 flows 一致", () => {
     const p = buildSystemPrompt({ ...cand, today: "2026-10-25", imageCount: 3 });
     expect(p).toContain("2026-10-25");
     expect(p).toContain("imageIdx");
     expect(p).toContain("3 张");
     expect(p).toContain("图1");
+    expect(p).toContain("默认挂本次消息的图");
+  });
+
+  it("示例卡片按分支派生：day 用 today；0 图时示例不带 imageIdx 键", () => {
+    const withImgs = buildSystemPrompt({ ...cand, today: "2026-10-25", imageCount: 3 });
+    expect(withImgs).toContain('"day":"2026-10-25"');
+    expect(withImgs).toContain('"imageIdx":[1]');
+
+    const noImgs = buildSystemPrompt({ ...cand, today: "2099-01-01", imageCount: 0 });
+    expect(noImgs).toContain('"day":"2099-01-01"');
+    expect(noImgs).not.toContain('"imageIdx"');
   });
 
   it("候选为空时给出占位而不是空缺", () => {
