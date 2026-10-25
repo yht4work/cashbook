@@ -37,6 +37,7 @@ const UID_OTHER = 999998;
 const BOOK_DEL = "test-chat-del";
 const BOOK_CTX = "test-chat-ctx";
 const BOOK_SAVE = "test-chat-save";
+const BOOK_CAND = "test-chat-cand";
 
 let tmpDir: string;
 
@@ -323,6 +324,43 @@ describe("getContext", () => {
     } finally {
       await prisma.chatSession.deleteMany({ where: { id: foreign.id } });
     }
+  });
+
+  it("getContext 加法（Task 6）：cand/today 与 system 同源；beforeId 把失败轮截出 turns", async () => {
+    // 专用账本让 cand 可做全量断言（不依赖别的用例留下的候选值）
+    await mkFlow(BOOK_CAND, { industryType: "外卖", payType: "微信", attribution: "我" });
+    await mkFlow(BOOK_CAND, { industryType: "外卖", payType: "卡券", attribution: "家里", money: 3 });
+
+    const { id } = await createSession(UID);
+    await appendUserMessage(UID, id, "第一问");
+    await appendAssistantMessage(UID, id, "第一条回复", null, 0);
+    await appendUserMessage(UID, id, "第二问", ["p1.png"]); // 触发失败轮的 user 消息
+    const failed = await prisma.chatMessage.create({
+      data: { sessionId: id, userId: UID, role: "assistant", content: "生成失败", status: -1 },
+    });
+
+    const ctx = await getContext(UID, id, BOOK_CAND, { beforeId: failed.id });
+
+    // cand / today 全量相等且就是这次查询算出的那一份（distinct 去重 + 空白过滤）
+    expect(new Set(ctx.cand.industry)).toEqual(new Set(["外卖"]));
+    expect(new Set(ctx.cand.pay)).toEqual(new Set(["微信", "卡券"]));
+    expect(new Set(ctx.cand.attribution)).toEqual(new Set(["我", "家里"]));
+    expect(Object.keys(ctx.cand)).toEqual(["industry", "pay", "attribution"]);
+    expect(ctx.today).toBe(todayOf());
+    expect(ctx.system).toContain(ctx.today); // system 里的「今天」同源
+    expect(ctx.system).toContain("外卖"); // 候选也注入了 system
+
+    // beforeId 截轮：失败行（id 不小于 retryId）整体不在 turns 里；
+    // 最后一轮恰好是触发失败的 user 轮（sendCore 的 default() 图片来源）
+    expect(ctx.turns.map((t) => t.content)).toEqual(["第一问", "第一条回复", "第二问"]);
+    expect(ctx.turns.at(-1)).toEqual({ role: "user", content: "第二问", images: ["p1.png"] });
+    expect(buildImageNumbering(ctx.turns, CHAT_IMAGE_WINDOW)).toEqual(["p1.png"]);
+
+    // 不传 opts：失败行照常在 turns 里（原行为不变）
+    const full = await getContext(UID, id, BOOK_CAND);
+    expect(full.turns.map((t) => t.content)).toContain("生成失败");
+    expect(full.cand).toEqual(ctx.cand);
+    expect(full.today).toBe(ctx.today);
   });
 });
 

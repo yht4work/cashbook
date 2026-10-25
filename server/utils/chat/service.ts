@@ -184,16 +184,31 @@ const recentFlowSummary = (
   return [`该账本最近 ${flows.length} 条流水（参考口径，不要重复记账）：`, ...lines];
 };
 
+export type ChatContext = {
+  system: string;
+  turns: ChatTurn[];
+  /** 与 system 同源的类型候选集（normalizeFlows 直接用，不许再查第二遍） */
+  cand: { industry: string[]; pay: string[]; attribution: string[] };
+  /** 组装 system 时的「今天」（normalizeFlows 的 dayFallback 同源用） */
+  today: string;
+};
+
 export const getContext = async (
   userId: number,
   sessionId: number,
-  bookId: string
-): Promise<{ system: string; turns: ChatTurn[] }> => {
+  bookId: string,
+  /** retry 截轮：只把 id < beforeId 的消息算进 turns（失败轮自身被截出去） */
+  opts?: { beforeId?: number }
+): Promise<ChatContext> => {
   await ownSession(userId, sessionId);
 
   const [rows, industry, pay, attribution, recent] = await Promise.all([
     prisma.chatMessage.findMany({
-      where: { sessionId, userId },
+      where: {
+        sessionId,
+        userId,
+        ...(Number.isInteger(opts?.beforeId) ? { id: { lt: opts!.beforeId! } } : {}),
+      },
       orderBy: { id: "desc" },
       take: CHAT_HISTORY_LIMIT,
     }),
@@ -214,19 +229,18 @@ export const getContext = async (
     ...(r.flows !== null && r.flows !== undefined ? { flows: r.flows } : {}),
   }));
 
+  // cand/today/system 同一次算出、同一个值往下传：normalizeFlows 直接消费，
+  // 两头对账本的口径不再可能各取一份
+  const cand = { industry, pay, attribution };
+  const today = todayOf();
+
   // 图编号单一事实源：prompt 的 imageCount 就传编号表长（接线见 consistency.test.ts）
   const system = [
-    buildSystemPrompt({
-      industry,
-      pay,
-      attribution,
-      today: todayOf(),
-      imageCount: buildImageNumbering(turns, CHAT_IMAGE_WINDOW).length,
-    }),
+    buildSystemPrompt({ ...cand, today, imageCount: buildImageNumbering(turns, CHAT_IMAGE_WINDOW).length }),
     ...recentFlowSummary(recent),
   ].join("\n");
 
-  return { system, turns };
+  return { system, turns, cand, today };
 };
 
 // ==================== 失败重试 ====================

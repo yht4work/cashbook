@@ -101,6 +101,9 @@ export default defineNuxtConfig({
     authSecret: "",
     adminUsername: "",
     adminPassword: "",
+    // ollama（chat 的 AI 中转）：NUXT_OLLAMA_BASE_URL / NUXT_OLLAMA_MODEL 可在 .env 覆盖
+    ollamaBaseUrl: "http://localhost:11434",
+    ollamaModel: "glm-5.3-flash:cloud",
   },
 
   modules: [
