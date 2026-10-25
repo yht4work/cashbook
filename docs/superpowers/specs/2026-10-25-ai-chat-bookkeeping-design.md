@@ -247,3 +247,25 @@ model ChatMessage {
 - 移动端（<1024px）：底部导航为 预算/分析/日历/流水/**AI 记账** 五项，
   「账本」不再出现在底栏；头部账本切换弹窗仍可用；汉堡侧栏里仍有账本管理。
 - 不产生 AI 静默写入的流水（数据库无未经人工确认的记录）。
+
+## V1 实施裁决记录（SDD 执行期间补充，2026-10-26）
+
+以下为实施与审查期间的实际裁决与已知限制，作为「验收」的补充口径：
+
+- **retry 契约**：POST `/api/entry/chat/retry` 的 body 需要
+  `{messageId, bookId, sessionId}`（本节原文只列 messageId）——bookId 供候选
+  校验、sessionId 供归属校验；契约已写入端点 swagger。
+- **已知 V1 限制**（都有记录，不阻塞验收）：
+  - done 帧的 messageId 在并发发送下可能取错行（前端锁定输入防并发，
+    单用户场景安全）。
+  - 会话历史窗口内若有一张小票文件缺失，该会话后续 send/retry 会以明确
+    错误文案失败，直到该轮滚出 20 条窗口（清理保证不误删被引用文件）。
+  - 首条消息后 done 帧延迟约 2s（服务端先完成 AI 起名再发 done）。
+  - 起名/正文偶发模型「指令复述」回声与孤立 think 闭合标签进 content
+    （模型质量问题，prompt 加固跟进）。
+  - `chatOnce` 仅连接超时、无读超时——ollama 接受连接后挂流会延迟
+    done/fail 帧（cloud 模型低概率）。
+- **既有全站口径**（非本功能引入，仅记录）：流水写入不校验 bookId 归属
+  （与 add.ts 一致）；getMessages 对不存在/他人会话返回空数组而非 404；
+  手动 fetch（store SSE/retry/saveCard）路径的 c==400 不触发登录跳转，
+  与 doApi 路径不一致（仅 toast）。
