@@ -79,9 +79,43 @@ interface ChatState {
 export const cardBooked = (c: DraftFlow): boolean =>
   typeof c.flowId === "number" && c.flowId > 0;
 
-/** 小票图片直显地址（GET /api/entry/flow/invoice/show，浏览器直接显示） */
+/** 小票图片直显地址（GET /api/entry/flow/invoice/show，浏览器直接显示）
+ *  ⚠ 该地址只给「能带 Authorization 头的请求」用：<img>/<a> 标签带不上这个
+ *  裸头（server/middleware/auth.ts 对 /api/entry 一律先验的头是 header），
+ *  直接当 src 会拿到 {"c":400,"m":"No Authorization"}——要显示请用 chatImageBlob。 */
 export const chatImageSrc = (name: string): string =>
   "/api/entry/flow/invoice/show?invoice=" + encodeURIComponent(name);
+
+/** show 接口的小票 blob URL 缓存（按文件名；页面生命周期内复用，不逐卡重复下载） */
+const imageBlobCache = new Map<string, string>();
+
+/**
+ * 小票图 blob URL（<img>/<a> 直显用，参照 FlowEditInvoiceDialog 同款做法）：
+ * show 接口要求裸 Authorization 头，<img> 标签带不上头 —— 走
+ * doApi.download（内部按项目惯例从 cookie 取 Authorization 放头）
+ * 拿 blob 再 URL.createObjectURL。失败返回 null（调用方占位/隐藏），已成功的
+ * 文件名复用缓存；blob 由页面级缓存持有，不随单卡卸载 revoke。
+ */
+export const chatImageBlob = (name: string): Promise<string | null> => {
+  const key = String(name ?? "");
+  if (!key) {
+    return Promise.resolve(null);
+  }
+  const hit = imageBlobCache.get(key);
+  if (hit) {
+    return Promise.resolve(hit);
+  }
+  return doApi
+    .download("api/entry/flow/invoice/show", { invoice: key })
+    .then((blob: Blob | null) => (blob ? URL.createObjectURL(blob) : null))
+    .then((url) => {
+      if (url) {
+        imageBlobCache.set(key, url);
+      }
+      return url;
+    })
+    .catch(() => null);
+};
 
 /** auth 头：与 doApi.getHeaders 同款（cookie → 裸 Authorization 头） */
 const authHeader = (): Record<string, string> => ({
@@ -562,19 +596,27 @@ export const useChatStore = defineStore("chat", {
 
     /**
      * 卡片入账：POST /chat/save（multipart；服务端契约是 FormData，
-     * 读的是 readFormData）→ 成功把回传 flowId 写回该卡，并按「全部卡
-     * 已入账 → 1，否则 0」派生消息 status（与服务端 saveCard 同口径）。
+     * 读的是 readFormData）→ 成功把回传 flowId 与本次提交的编辑值合并回
+     * 该卡（只写 flowId 会丢用户改名/改钱的编辑——服务端 flows 里已是
+     * 编辑后值，本地同步以提交载荷为准），并按「全部卡已入账 → 1，否则 0」
+     * 派生消息 status（与服务端 saveCard 同口径）。
      * 返回 flowId（失败已弹 toast 并抛出，返回值为 null 不会发生——doApi 抛）。
+     * bookId：入账目标账本（卡片上最终选择的账本）；缺省回退当前账本。
      */
-    async saveCard(messageId: number, index: number, card: DraftFlow): Promise<number | null> {
+    async saveCard(
+      messageId: number,
+      index: number,
+      card: DraftFlow,
+      bookId?: string
+    ): Promise<number | null> {
       const mid = Number(messageId) || 0;
       const idx = Number(index);
       if (!mid || !Number.isInteger(idx) || idx < 0) {
         Alert.error("卡片数据无效");
         throw new Error("卡片数据无效");
       }
-      const bookId = bookIdOf();
-      if (!bookId) {
+      const bookIdFinal = String(bookId ?? "").trim() || bookIdOf();
+      if (!bookIdFinal) {
         Alert.error("请先选择账本");
         throw new Error("请先选择账本");
       }
@@ -582,14 +624,14 @@ export const useChatStore = defineStore("chat", {
       fd.append("messageId", String(mid));
       fd.append("index", String(idx));
       fd.append("card", JSON.stringify(card));
-      fd.append("bookId", bookId);
+      fd.append("bookId", bookIdFinal);
       const d = await doApi.postform<{ flowId: number }>("api/entry/chat/save", fd);
       const flowId = Number(d?.flowId) || 0;
 
-      // 本地同步：flowId 写回 + status 派生（服务端行已同值落库）
+      // 本地同步：编辑值 + flowId 写回 + status 派生（服务端行已同值落库）
       const msg = this.messages.find((m) => m.id === mid);
       if (msg && msg.flowCards && msg.flowCards[idx]) {
-        msg.flowCards[idx] = { ...msg.flowCards[idx], flowId };
+        msg.flowCards[idx] = { ...msg.flowCards[idx], ...card, flowId };
         msg.flows = JSON.stringify(msg.flowCards);
         msg.status = msg.flowCards.every(cardBooked) ? 1 : 0;
       }

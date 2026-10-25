@@ -1,17 +1,20 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { ExclamationTriangleIcon } from "@heroicons/vue/24/outline";
-import { chatImageSrc, type ChatMessageItem } from "~/utils/chatStore";
+import { chatImageBlob, type ChatMessageItem } from "~/utils/chatStore";
+/* 显式 import（Nuxt dev 自动导入不收编新组件） */
+import ChatDraftCard from "~/components/chat/ChatDraftCard.vue";
 
 /**
  * 单条消息气泡（Task 8 渲染层）：
- * - user：右对齐，文字 + 小票缩略行（点击锚点开大图 /api/entry/flow/invoice/show）；
+ * - user：右对齐，文字 + 小票缩略行（点击锚点用 blob 开大图；show 接口要求
+ *   裸 Authorization 头，<img>/<a> 带不上，缩略一律 chatImageBlob 直显）；
  *   待发行（pending）缩略图用 blob 预览，落地后由 loadMessages 的服务端行接管。
  * - assistant：左对齐，叙述文本简单换行渲染（whitespace-pre-wrap，不解析 markdown）；
  *   首部 trim 一次（旧数据可能残留前导空行）。
  * - 流式行（msg.streaming）显示打字光标；内容未到时显示三点待机。
  * - status=-1：失败态（警示样式 + 服务端错误文案）；重试按钮留给 Task 10（store.retry）。
- * - flows 非空：仅渲染空容器占位（Task 9 在挂点接 ChatDraftCard），不渲染 JSON 原文。
+ * - flows 非空：卡片挂点逐项渲染 ChatDraftCard（编辑/小票勾选/入账）。
  */
 interface Props {
   msg: ChatMessageItem;
@@ -24,13 +27,43 @@ const isUser = computed(() => props.msg.role === "user");
 /** content 首部 trim：历史行可能带残留前导空行/空格；流式行同口径 */
 const textOf = computed<string>(() => (props.msg.content ?? "").replace(/^\s+/, ""));
 
+/** 卡片行：flows 非空 → 逐项渲染 ChatDraftCard，气泡改占满列宽（表单撑得开） */
+const hasCards = computed<boolean>(() => !!(props.msg.flowCards && props.msg.flowCards.length));
+
 /** 加载失败的小票文件名（隐藏该缩略图，不给裂图占满气泡） */
 const broken = ref<string[]>([]);
 
+/** show 接口要求裸 Authorization 头，<img> 带不上 —— 缩略一律 blob 直显
+ *  （chatImageBlob = doApi.download → objectURL，与卡片/FlowEditInvoiceDialog 同源） */
+const blobUrls = ref<Record<string, string>>({});
+
+// 服务端行的缩略图按需取 blob（pending 行用 blob 预览，不走这里）
+watch(
+  () => (props.msg.pending ? "" : props.msg.imageList.join("|")),
+  (v, old) => {
+    if (v === old || props.msg.pending) {
+      return;
+    }
+    for (const n of props.msg.imageList) {
+      if (blobUrls.value[n]) {
+        continue;
+      }
+      chatImageBlob(n).then((url) => {
+        if (url && !blobUrls.value[n]) {
+          blobUrls.value[n] = url;
+        } else if (!url && !broken.value.includes(n)) {
+          broken.value.push(n);
+        }
+      });
+    }
+  },
+  { immediate: true }
+);
+
 interface Thumb {
   key: string; // 去重/失败标记的键：待发行用 blob URL，落地行用文件名
-  src: string; // 缩略图地址
-  full: string; // 大图地址
+  src: string; // 缩略图地址（blob URL）
+  full: string; // 大图地址（同一 blob，新标签页直开）
   live: boolean; // 是否还在发送中（blob 预览）
 }
 
@@ -39,9 +72,10 @@ const thumbs = computed<Thumb[]>(() => {
   if (m.pending) {
     return (m.pendingImages ?? []).map((u) => ({ key: u, src: u, full: u, live: true }));
   }
+  // 服务端行：show 要裸头，<img>/<a> 带不上——blob URL 就绪才渲染，失败仍隐藏
   return m.imageList
-    .filter((n) => !broken.value.includes(n))
-    .map((n) => ({ key: n, src: chatImageSrc(n), full: chatImageSrc(n), live: false }));
+    .filter((n) => blobUrls.value[n] && !broken.value.includes(n))
+    .map((n) => ({ key: n, src: blobUrls.value[n], full: blobUrls.value[n], live: false }));
 });
 
 const onThumbError = (key: string): void => {
@@ -115,8 +149,11 @@ const onThumbError = (key: string): void => {
 
       <!-- 正常 / 流式态（flows 非空但无叙述文本的行也渲染——挂点要能展示卡片） -->
       <div
-        v-else-if="textOf || msg.streaming || (msg.flowCards && msg.flowCards.length)"
-        class="rounded-2xl rounded-bl-md border border-frame bg-surface px-3.5 py-2 md:px-4 md:py-2.5 shadow-sm dark:border-frame-dark dark:bg-surface-darkMuted"
+        v-else-if="textOf || msg.streaming || hasCards"
+        :class="[
+          'rounded-2xl rounded-bl-md border border-frame bg-surface px-3.5 py-2 md:px-4 md:py-2.5 shadow-sm dark:border-frame-dark dark:bg-surface-darkMuted',
+          hasCards ? 'w-full md:w-[30rem] md:max-w-[85%]' : 'w-fit max-w-[92%] md:max-w-[80%]',
+        ]"
       >
         <p
           v-if="textOf"
@@ -128,12 +165,20 @@ const onThumbError = (key: string): void => {
         <div v-else-if="msg.streaming" class="chat-typing" aria-label="生成中">
           <i></i><i></i><i></i>
         </div>
-        <!-- flows 卡片挂点：Task 9 在此接 ChatDraftCard（本任务仅空容器，不渲染 JSON 原文） -->
+        <!-- flows 卡片挂点：ChatDraftCard 逐卡渲染（编辑/小票勾选/入账在卡片内闭环） -->
         <div
-          v-if="msg.flowCards && msg.flowCards.length"
-          class="chat-cards-slot"
+          v-if="hasCards"
+          class="chat-cards-slot mt-2 flex flex-col gap-2"
           data-chat-cards-slot="true"
-        ></div>
+        >
+          <ChatDraftCard
+            v-for="(c, i) in msg.flowCards"
+            :key="`${msg.id}-card-${i}`"
+            :card="c"
+            :index="i"
+            :message-id="msg.id"
+          />
+        </div>
       </div>
     </div>
   </div>
