@@ -1,0 +1,412 @@
+/**
+ * chat 领域服务：整个 chat 功能里唯一摸 prisma / 文件系统的模块；HTTP 端点
+ * （任务 5/6）只做鉴权与壳调用。职责：
+ * - 会话 CRUD 与消息落库/读取/编辑（updateDate 驱动会话列表排序）
+ * - 上下文组装（getContext：候选值查询 + 最近流水摘要 + 图编号接线）
+ * - 卡片入账（saveCard：建 Flow + flows 回写 + status 派生，事务包裹）
+ * - 图片文件：保存 / 读回 / 删除清理，文件名一律 chat-{sessionId}-{ts}-{n}.{ext}
+ *   （只落 dataDir/images；dataDir 由 handlers 从 runtimeConfig.dataPath 接进来）
+ *
+ * 抛错统一为带中文 message 的普通 Error，由端点转 error()；不依赖任何
+ * Nuxt auto-import，纯 import 保证 node/vitest 可直接跑。
+ */
+
+import prisma from "~~/server/lib/prisma";
+import { buildSystemPrompt, buildTitlePrompt } from "~~/server/utils/chat/prompt";
+import { buildImageNumbering, type ChatTurn, type ImageWindowOpts } from "~~/server/utils/chat/history";
+import type { DraftFlow } from "~~/server/utils/chat/flows";
+import { chatOnce, type OllamaCfg } from "~~/server/utils/chat/ollama";
+import fs from "node:fs/promises";
+import path from "node:path";
+
+/** 与设计文档「图片窗口」一致的窗口参数：最近 3 条含图 user 轮、单次最多 6 张 */
+export const CHAT_IMAGE_WINDOW: ImageWindowOpts = { imageTurnLimit: 3, imageTotalLimit: 6 };
+
+/** 上下文带上的最近消息条数（设计文档：最近 20 条） */
+export const CHAT_HISTORY_LIMIT = 20;
+
+/** 本功能产生/清理的图片文件名前缀：清理时只碰 chat- 开头的文件 */
+const CHAT_FILE_PREFIX = "chat-";
+
+/** 注入 system prompt 的最近流水条数（摘要兜底，帮助模型参考记账口径） */
+const RECENT_FLOW_COUNT = 5;
+
+// ==================== 小工具 ====================
+
+/** images 目录 = <dataDir>/images（与 flow/invoice upload 的落点一致） */
+const imagesDir = (dataDir: string): string => path.join(dataDir, "images");
+
+/** 归属校验：不是该用户的会话一律按「会话不存在」处理 */
+const ownSession = async (userId: number, sessionId: number) => {
+  const s = await prisma.chatSession.findFirst({ where: { id: sessionId, userId } });
+  if (!s) {
+    throw new Error("会话不存在");
+  }
+  return s;
+};
+
+/** 追加消息后统一刷新 updateDate——会话列表按它倒序 */
+const touchSession = (sessionId: number) =>
+  prisma.chatSession.update({ where: { id: sessionId }, data: { updateDate: new Date() } });
+
+/** 金额归一：数字且 ≥0 收下，否则 0（与 normalizeFlows 的 moneyOf 同口径） */
+const moneyOf = (v: unknown): number => {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+};
+
+/** 卡片「已入账」判定（与 history 折叠语义同一口径） */
+const hasFlowId = (c: unknown): boolean =>
+  typeof (c as { flowId?: unknown })?.flowId === "number" && (c as { flowId: number }).flowId > 0;
+
+/** 上海时区的今天：YYYY-MM-DD（now 可注入，测试钉跨日边界） */
+export const todayOf = (now: Date = new Date()): string =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(now);
+
+// ==================== 会话 ====================
+
+export const listSessions = (userId: number): Promise<Array<{ id: number; title: string | null; updateDate: Date }>> =>
+  prisma.chatSession.findMany({
+    where: { userId },
+    orderBy: { updateDate: "desc" },
+    select: { id: true, title: true, updateDate: true },
+  });
+
+export const createSession = async (userId: number): Promise<{ id: number }> => {
+  const s = await prisma.chatSession.create({ data: { userId } }); // title 留 null（空标题起步）
+  return { id: s.id };
+};
+
+export const deleteSession = async (userId: number, sessionId: number, dataDir: string): Promise<void> => {
+  const session = await ownSession(userId, sessionId);
+
+  // 要清理的文件名得在删消息前取出来（消息没了就查不到了）
+  const rows = await prisma.chatMessage.findMany({
+    where: { sessionId: session.id, userId },
+    select: { images: true },
+  });
+  const candidates = [
+    ...new Set(rows.flatMap((r) => (r.images ?? "").split(",")).filter((n) => n.startsWith(CHAT_FILE_PREFIX))),
+  ];
+
+  await prisma.chatMessage.deleteMany({ where: { sessionId: session.id, userId } });
+  await prisma.chatSession.deleteMany({ where: { id: session.id, userId } }); // FK RESTRICT：消息已先删
+
+  // 只删未被该用户任一 Flow.invoice 引用的：invoice 按逗号拆开做精确匹配
+  //（不能 contains——chat-1-1.png 是 chat-1-11.png 的子串）
+  const flows = await prisma.flow.findMany({
+    where: { userId, invoice: { not: null } },
+    select: { invoice: true },
+  });
+  const referenced = new Set(flows.map((f) => f.invoice ?? "").flatMap((v) => v.split(",")));
+  await Promise.all(
+    candidates
+      .filter((n) => !referenced.has(n))
+      .map((n) => fs.unlink(path.join(imagesDir(dataDir), n)).catch((e: NodeJS.ErrnoException) => {
+        if (e?.code !== "ENOENT") {
+          throw e;
+        }
+      }))
+  );
+};
+
+// ==================== 消息 ====================
+
+/** getMessages 的行：字段按存储原样（images/flows 为逗号串与 JSON 串） */
+export type ChatMessageRow = {
+  id: number;
+  role: string;
+  content: string | null;
+  images: string | null;
+  flows: string | null;
+  status: number | null;
+  createDate: Date;
+};
+
+export const getMessages = (userId: number, sessionId: number): Promise<ChatMessageRow[]> =>
+  prisma.chatMessage.findMany({
+    where: { sessionId, userId },
+    orderBy: { id: "asc" },
+    select: { id: true, role: true, content: true, images: true, flows: true, status: true, createDate: true },
+  });
+
+export const appendUserMessage = async (
+  userId: number,
+  sessionId: number,
+  content: string,
+  images: string[] = []
+): Promise<void> => {
+  await ownSession(userId, sessionId);
+  await prisma.chatMessage.create({
+    data: { sessionId, userId, role: "user", content, images: images.join(",") },
+  });
+  await touchSession(sessionId);
+};
+
+export const appendAssistantMessage = async (
+  userId: number,
+  sessionId: number,
+  content: string,
+  flows: string | null,
+  status: number
+): Promise<void> => {
+  await ownSession(userId, sessionId);
+  await prisma.chatMessage.create({
+    data: { sessionId, userId, role: "assistant", content, images: null, flows, status },
+  });
+  await touchSession(sessionId);
+};
+
+// ==================== 上下文组装 ====================
+
+/** 候选值查询：与 getAttributions / flow/type/getAll 同法（distinct 单列 + 非空过滤） */
+const distinctFlowCol = async (bookId: string, userId: number, col: "industryType" | "payType" | "attribution"): Promise<string[]> => {
+  const rows: Array<Record<string, string | null>> = (await prisma.flow.findMany({
+    distinct: [col],
+    select: { [col]: true },
+    orderBy: [{ [col]: "asc" }],
+    where: { bookId, userId },
+  })) as Array<Record<string, string | null>>;
+  return [
+    ...new Set(rows.map((r) => String(r[col] ?? "").trim()).filter(Boolean)),
+  ];
+};
+
+/** 最近几条流水摘要注入 system prompt（口径参考，也防模型把已记的流水再记一遍） */
+const recentFlowSummary = (
+  flows: Array<{ day: string; flowType: string | null; name: string | null; money: number | null }>
+): string[] => {
+  if (flows.length === 0) {
+    return [];
+  }
+  const lines = flows.map((f) =>
+    [f.day, f.flowType || "支出", f.name || "未命名流水", f.money !== null && f.money !== undefined ? `${f.money}元` : ""]
+      .filter(Boolean)
+      .join(" ")
+  );
+  return [`该账本最近 ${flows.length} 条流水（参考口径，不要重复记账）：`, ...lines];
+};
+
+export const getContext = async (
+  userId: number,
+  sessionId: number,
+  bookId: string
+): Promise<{ system: string; turns: ChatTurn[] }> => {
+  await ownSession(userId, sessionId);
+
+  const [rows, industry, pay, attribution, recent] = await Promise.all([
+    prisma.chatMessage.findMany({
+      where: { sessionId, userId },
+      orderBy: { id: "desc" },
+      take: CHAT_HISTORY_LIMIT,
+    }),
+    distinctFlowCol(bookId, userId, "industryType"),
+    distinctFlowCol(bookId, userId, "payType"),
+    distinctFlowCol(bookId, userId, "attribution"),
+    prisma.flow.findMany({
+      where: { bookId, userId },
+      orderBy: { id: "desc" },
+      take: RECENT_FLOW_COUNT,
+    }),
+  ]);
+
+  const turns: ChatTurn[] = rows.reverse().map((r) => ({
+    role: r.role,
+    content: r.content ?? "",
+    images: r.images ? r.images.split(",") : [],
+    ...(r.flows !== null && r.flows !== undefined ? { flows: r.flows } : {}),
+  }));
+
+  // 图编号单一事实源：prompt 的 imageCount 就传编号表长（接线见 consistency.test.ts）
+  const system = [
+    buildSystemPrompt({
+      industry,
+      pay,
+      attribution,
+      today: todayOf(),
+      imageCount: buildImageNumbering(turns, CHAT_IMAGE_WINDOW).length,
+    }),
+    ...recentFlowSummary(recent),
+  ].join("\n");
+
+  return { system, turns };
+};
+
+// ==================== 失败重试 ====================
+
+export const updateFailedMessage = async (userId: number, messageId: number, content: string): Promise<string> => {
+  const msg = await prisma.chatMessage.findFirst({ where: { id: messageId, userId } });
+  if (!msg) {
+    throw new Error("消息不存在");
+  }
+  if (msg.status !== -1) {
+    throw new Error("只有失败的消息可以重试");
+  }
+  await prisma.chatMessage.update({ where: { id: msg.id }, data: { content } });
+
+  // 该轮的前置 user 消息（重试不重传图、不重复落 user 消息，文件名从这里来）
+  const prior = await prisma.chatMessage.findFirst({
+    where: { sessionId: msg.sessionId, userId, role: "user", id: { lt: messageId } },
+    orderBy: { id: "desc" },
+  });
+  return prior?.images ?? "";
+};
+
+// ==================== 卡片入账 ====================
+
+const parseCards = (raw: string | null): Array<Record<string, unknown>> | null => {
+  if (!raw) {
+    return null;
+  }
+  try {
+    const cards = JSON.parse(raw);
+    return Array.isArray(cards) ? (cards as Array<Record<string, unknown>>) : null;
+  } catch {
+    return null;
+  }
+};
+
+/** 编辑卡的写回白名单（AI 预填的 imageIdx 与请求里的杂键都不残留） */
+const cardForJson = (c: DraftFlow): Record<string, unknown> => ({
+  day: String(c.day ?? ""),
+  flowType: String(c.flowType ?? ""),
+  industryType: String(c.industryType ?? ""),
+  payType: String(c.payType ?? ""),
+  name: String(c.name ?? ""),
+  description: String(c.description ?? ""),
+  attribution: String(c.attribution ?? ""),
+  invoices: Array.isArray(c.invoices) ? c.invoices.map(String) : [],
+  money: moneyOf(c.money),
+});
+
+export const saveCard = async (
+  userId: number,
+  messageId: number,
+  index: number,
+  card: DraftFlow,
+  bookId: string
+): Promise<{ flowId: number }> => {
+  const msg = await prisma.chatMessage.findFirst({ where: { id: messageId, userId } });
+  if (!msg) {
+    throw new Error("消息不存在");
+  }
+  const cards = parseCards(msg.flows);
+  if (msg.role !== "assistant" || !cards) {
+    throw new Error("该消息没有可入账的卡片");
+  }
+  if (!Number.isInteger(index) || index < 0 || index >= cards.length) {
+    throw new Error("卡片不存在");
+  }
+  if (hasFlowId(cards[index])) {
+    throw new Error("该卡片已入账");
+  }
+
+  const created = await prisma.$transaction(async (tx) => {
+    const flow = await tx.flow.create({
+      data: {
+        userId,
+        bookId,
+        day: String(card.day ?? ""),
+        flowType: String(card.flowType ?? ""),
+        industryType: String(card.industryType ?? ""),
+        payType: String(card.payType ?? ""),
+        money: moneyOf(card.money),
+        name: String(card.name ?? ""),
+        description: String(card.description ?? ""),
+        attribution: String(card.attribution ?? ""),
+        invoice: Array.isArray(card.invoices) ? card.invoices.map(String).join(",") : "",
+      },
+    });
+    cards[index] = { ...cardForJson(card), flowId: flow.id };
+
+    // 状态派生：全部卡片都有 flowId → 1，否则 0（与 history 的折叠判定同口径）
+    const allSaved = cards.every(hasFlowId);
+    await tx.chatMessage.update({
+      where: { id: msg.id },
+      data: { flows: JSON.stringify(cards), status: allSaved ? 1 : 0 },
+    });
+    return flow;
+  });
+
+  return { flowId: created.id };
+};
+
+// ==================== 会话标题 ====================
+
+/** 起名清洗：剥空白/引号/句读，截 12 字（buildTitlePrompt 承诺 ≤12 字） */
+const sanitizeTitle = (raw: string): string =>
+  [...raw.replace(/[\s"'`“”‘’「」『』。．.,，、:!！?？]/g, "")]
+    .slice(0, 12)
+    .join("");
+
+export const ensureTitle = async (
+  userId: number,
+  sessionId: number,
+  userText: string,
+  replyText: string,
+  cfg?: OllamaCfg
+): Promise<string | null> => {
+  const session = await prisma.chatSession.findFirst({ where: { id: sessionId, userId } });
+  if (!session) {
+    return null;
+  }
+  if (session.title !== null) {
+    return null; // 已有标题（含失败回退写过的）——后续消息不再重命名（V1）
+  }
+  let title = "";
+  try {
+    if (cfg) {
+      title = sanitizeTitle(await chatOnce(cfg, buildTitlePrompt(userText, replyText)));
+    }
+  } catch {
+    // 起名失败静默回退，不打扰对话流
+  }
+  if (!title) {
+    title = userText.slice(0, 20);
+  }
+  await prisma.chatSession.update({ where: { id: session.id }, data: { title } });
+  return title;
+};
+
+// ==================== 图片文件 ====================
+
+export type SaveImageFile = { ext: string; data: Buffer };
+
+/** 存小票图：文件名 chat-{sessionId}-{ts}-{n}.{ext}，返回落地的文件名列表 */
+export const saveImages = async (
+  userId: number,
+  sessionId: number,
+  files: SaveImageFile[],
+  dataDir: string
+): Promise<string[]> => {
+  await ownSession(userId, sessionId);
+  const dir = imagesDir(dataDir);
+  await fs.mkdir(dir, { recursive: true });
+  const ts = Date.now();
+  const names: string[] = [];
+  for (const f of files) {
+    if (!f || !Buffer.isBuffer(f.data) || f.data.length === 0) {
+      continue;
+    }
+    let ext = String(f.ext ?? "").trim();
+    if (ext && !ext.startsWith(".")) {
+      ext = "." + ext;
+    }
+    const name = `chat-${sessionId}-${ts}-${names.length + 1}${ext}`;
+    await fs.writeFile(path.join(dir, name), f.data);
+    names.push(name);
+  }
+  return names;
+};
+
+/** 读小票图为 base64（ollama images 字段要裸 base64；missing 文件让错误往上抛） */
+export const loadImages = async (dataDir: string, names: string[]): Promise<Map<string, string>> => {
+  const out = new Map<string, string>();
+  await Promise.all(
+    [...new Set(names.filter(Boolean))].map(async (n) => {
+      const buf = await fs.readFile(path.join(imagesDir(dataDir), n));
+      out.set(n, buf.toString("base64"));
+    })
+  );
+  return out;
+};
