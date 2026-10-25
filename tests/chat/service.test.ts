@@ -5,7 +5,7 @@
  * - ensureTitle 用本地 node http 起迷你 ollama mock（chatOnce 的请求契约
  *   已由 ollama.test.ts 钉死，这里只钉 service 侧的接线）。
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -57,12 +57,12 @@ afterAll(async () => {
   await fsp.rm(tmpDir, { recursive: true, force: true });
 });
 
-/** 自建测试流水：返回创建后的 id */
+/** 自建测试流水：返回创建后的 id（显式传 null 的字段会真的存 null） */
 const mkFlow = async (
   bookId: string,
   o: {
     day?: string;
-    flowType?: string;
+    flowType?: string | null;
     industryType?: string | null;
     payType?: string | null;
     attribution?: string | null;
@@ -76,13 +76,13 @@ const mkFlow = async (
       userId: UID,
       bookId,
       day: o.day ?? "2026-10-25",
-      flowType: o.flowType ?? "支出",
-      industryType: o.industryType ?? "",
-      payType: o.payType ?? "",
+      flowType: o.flowType !== undefined ? o.flowType : "支出",
+      industryType: o.industryType !== undefined ? o.industryType : "",
+      payType: o.payType !== undefined ? o.payType : "",
       money: o.money ?? 0,
       name: o.name ?? "",
       description: "",
-      attribution: o.attribution ?? "",
+      attribution: o.attribution !== undefined ? o.attribution : "",
       invoice: o.invoice ?? "",
     },
   });
@@ -154,6 +154,25 @@ describe("deleteSession", () => {
     expect(exists(imgZ)).toBe(true); // 只清本会话消息里的文件
     expect(exists(imgY)).toBe(false); // 未引用的 chat-* → 删除
     expect((await listSessions(UID)).some((s) => s.id === session.id)).toBe(false);
+  });
+
+  it("文件清理失败不影响已提交的删除：记日志吞掉，行照删", async () => {
+    const { id } = await createSession(UID);
+    const dir = path.join(tmpDir, "images");
+    const dirName = `chat-${id}-200-1-bad.png`; // 同名候选其实是目录 → unlink 报非 ENOENT
+    await fsp.mkdir(path.join(dir, dirName), { recursive: true });
+    await appendUserMessage(UID, id, "清理会失败", [dirName]);
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await deleteSession(UID, id, tmpDir); // 正常 resolve（DB 已提交的删除不能反着报 500）
+      expect(errSpy).toHaveBeenCalled(); // 非ENOENT 的清理事后可见（日志）
+    } finally {
+      errSpy.mockRestore();
+    }
+    expect(await prisma.chatMessage.count({ where: { sessionId: id } })).toBe(0);
+    expect(await prisma.chatSession.findUnique({ where: { id } })).toBeNull();
+    expect(fs.existsSync(path.join(dir, dirName))).toBe(true); // 混账文件原地留待人工
   });
 
   it("会话不存在 / 不是自己的 → 抛错；什么都不动", async () => {
@@ -235,16 +254,17 @@ describe("getContext", () => {
   };
 
   it("候选值 / 最近 5 条流水 / 编号表一致的 imageCount / turns 截最近 20 条且透传 flows", async () => {
-    // 候选值来源：同一批流水兼任「最近 5 条」素材
+    // 候选值来源：同一批流水兼任「最近 5 条」素材；各条 day 故意拉开，
+    // 让「按 day 倒序取最近 5 条」的口径也被钉死（早饭补录在 10-26 也在列）
     const names = ["早饭", "薯片", "晚饭", "地铁", "瓜子", "奶茶", "打车", "无名"];
-    await mkFlow(BOOK_CTX, { industryType: "餐饮", payType: "微信", attribution: "家里", name: names[0], money: 35 });
-    await mkFlow(BOOK_CTX, { industryType: "零食", payType: "支付宝", attribution: "公司", name: names[1], money: 12.5 });
+    await mkFlow(BOOK_CTX, { day: "2026-10-26", industryType: "餐饮", payType: "微信", attribution: "家里", name: names[0], money: 35 });
+    await mkFlow(BOOK_CTX, { day: "2026-01-01", industryType: "零食", payType: "支付宝", attribution: "公司", name: names[1], money: 12.5 });
     await mkFlow(BOOK_CTX, { industryType: "餐饮", payType: "现金", attribution: "家里", name: names[2], money: 40 });
     await mkFlow(BOOK_CTX, { industryType: "交通", payType: "其他", attribution: "我", name: names[3], money: 4 });
     await mkFlow(BOOK_CTX, { industryType: "零食", payType: "微信", attribution: "伴侣", name: names[4], money: 9.9 });
     await mkFlow(BOOK_CTX, { industryType: "餐饮", payType: "微信", attribution: "家里", name: names[5], money: 15 });
     await mkFlow(BOOK_CTX, { industryType: "交通", payType: "支付宝", attribution: "我家", name: names[6], money: 22 });
-    await mkFlow(BOOK_CTX, { industryType: null, payType: null, attribution: " ", name: names[7], money: 1 });
+    await mkFlow(BOOK_CTX, { flowType: null, industryType: null, payType: null, attribution: " ", name: names[7], money: 1 });
 
     const { id } = await createSession(UID);
     const expectedFirst = await seedMessages(id);
@@ -274,12 +294,14 @@ describe("getContext", () => {
     expect(new Set(candOf(ctx.system, "attribution"))).toEqual(new Set(["家里", "公司", "我", "伴侣", "我家"]));
     expect(ctx.system).toContain(todayOf()); // system prompt 里的今天
 
-    // 最近 5 条摘要：最新 5 条的流水名都在，更早的不在
+    // 最近 5 条摘要：按 day 倒序取（10-26 早饭在列，1-01 薯片落窗），
+    // 且空 flowType 渲染成「未分类」而非编造的收入/支出
     expect(ctx.system).toContain("最近 5 条");
-    for (const n of ["无名", "打车", "奶茶", "瓜子", "地铁"]) {
+    for (const n of ["早饭", "无名", "打车", "奶茶", "瓜子"]) {
       expect(ctx.system).toContain(n);
     }
-    for (const n of ["薯片", "早饭", "晚饭"]) {
+    expect(ctx.system).toContain("未分类");
+    for (const n of ["薯片", "晚饭", "地铁"]) {
       expect(ctx.system).not.toContain(n);
     }
   });
@@ -407,6 +429,51 @@ describe("saveCard", () => {
     ]);
     expect(second.flowId).not.toBe(first.flowId);
     await prisma.flow.deleteMany({ where: { id: { in: [first.flowId, second.flowId] } } });
+  });
+
+  it("并发保存不丢账：事务先 SELECT FOR UPDATE 行锁排队，锁后重读看到别人已提交的 flowId", async () => {
+    const { id } = await createSession(UID);
+    const msgId = await seedCards(id);
+    const card: DraftFlow = {
+      day: "2026-10-24", flowType: "支出", industryType: "", payType: "",
+      money: 15, name: "奶茶", description: "", attribution: "", invoices: [],
+    };
+
+    // 模拟「先点的那次入账」：独立事务先建 Flow、把卡 1 写回 flowId，但持锁不提交
+    let t1FlowId = 0;
+    let t1Ready!: () => void;
+    const ready = new Promise<void>((r) => (t1Ready = r));
+    let unblockT1!: () => void;
+    const blocker = new Promise<void>((r) => (unblockT1 = r));
+    const firstSave = prisma.$transaction(async (tx) => {
+      const flow = await tx.flow.create({
+        data: { userId: UID, bookId: BOOK_SAVE, day: "2026-10-24", flowType: "支出", name: "奶茶(先点)" },
+      });
+      t1FlowId = flow.id;
+      const cards = JSON.parse((await tx.chatMessage.findUnique({ where: { id: msgId } }))!.flows!);
+      cards[1] = { ...cards[1], flowId: flow.id };
+      await tx.chatMessage.update({ where: { id: msgId }, data: { flows: JSON.stringify(cards) } });
+      t1Ready(); // 已写入并持住行锁
+      await blocker;
+    });
+    await ready;
+
+    // 双击同卡：saveCard 必须在锁上排队，拿到锁后重读到 flowId 并拒绝（而不是
+    // 基于旧快照重复建 Flow 并覆盖掉 T1 的 flowId）
+    const secondSave = saveCard(UID, msgId, 1, card, BOOK_SAVE).then(
+      (v) => ({ ok: true as const, ...v }),
+      (e: Error) => ({ ok: false as const, msg: e.message })
+    );
+    await new Promise((r) => setTimeout(r, 100)); // 留出排队时机（结果断言不依赖此时长）
+    unblockT1(); // 提交 T1 → saveCard 的 FOR UPDATE 放行
+    await firstSave;
+    expect(await secondSave).toEqual({ ok: false, msg: "该卡片已入账" });
+
+    expect(await prisma.flow.count({ where: { bookId: BOOK_SAVE, userId: UID } })).toBe(1); // 不重复建卡
+    const stored = JSON.parse((await prisma.chatMessage.findUnique({ where: { id: msgId } }))!.flows!);
+    expect(stored[1].flowId).toBe(t1FlowId); // 先点的那次入账没被覆盖
+    expect(stored[0]).not.toHaveProperty("flowId"); // 卡 0 原样
+    await prisma.flow.deleteMany({ where: { bookId: BOOK_SAVE, userId: UID } });
   });
 
   it("已入账的卡重复入账 / 越界下标 / 别人的消息 → 抛错", async () => {
@@ -577,6 +644,34 @@ describe("saveImages / loadImages", () => {
     const map = await loadImages(tmpDir, names);
     expect(map.get(names[0])).toBe(b1.toString("base64"));
     expect(map.get(names[1])).toBe(b2.toString("base64"));
+  });
+
+  it(" hostile 入参整体拒绝（白名单外 ext / 无效 data）：一个文件都不写", async () => {
+    const { id } = await createSession(UID);
+    const dir = path.join(tmpDir, "images");
+    await fsp.mkdir(dir, { recursive: true });
+    const before = (await fsp.readdir(dir)).length;
+
+    for (const bad of [
+      { ext: "x/../../evil", data: Buffer.from("穿越") },
+      { ext: ".p.g", data: Buffer.from("中点不止一个") },
+      { ext: ".", data: Buffer.from("光杆句点") },
+      { ext: "", data: Buffer.from("无扩展名") },
+    ]) {
+      await expect(saveImages(UID, id, [bad], tmpDir)).rejects.toThrow("图片扩展名不合法");
+    }
+    await expect(
+      saveImages(UID, id, [{ ext: ".png", data: Buffer.alloc(0) }], tmpDir)
+    ).rejects.toThrow("图片数据无效");
+    // 合法与非法混着来也一样整体拒（先全量校验再写盘）
+    await expect(
+      saveImages(UID, id, [
+        { ext: ".png", data: Buffer.from("合法的") },
+        { ext: ".p.g", data: Buffer.from("非法的") },
+      ], tmpDir)
+    ).rejects.toThrow("图片扩展名不合法");
+
+    expect((await fsp.readdir(dir)).length).toBe(before);
   });
 
   it("别人的 sessionId 存图 → 抛错", async () => {

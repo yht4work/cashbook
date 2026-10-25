@@ -20,6 +20,13 @@ export type OllamaMsg = { role: string; content: string; images?: string[] };
 
 export type ImageWindowOpts = { imageTurnLimit: number; imageTotalLimit: number };
 
+/**
+ * 单张卡「已入账」判定：flowId 是正数才认。导出给 chat/service 的入账
+ * /status 派生共用——折叠语义与入账状态必须来自同一条规则，不许两处各写。
+ */
+export const cardBooked = (c: unknown): boolean =>
+  typeof (c as { flowId?: unknown })?.flowId === "number" && (c as { flowId: number }).flowId > 0;
+
 /** assistant 轮「已入账」（所有卡都有 flowId）时返回流水张数，否则 null */
 const settledCountOf = (flows?: string): number | null => {
   if (!flows) {
@@ -30,7 +37,7 @@ const settledCountOf = (flows?: string): number | null => {
     if (!Array.isArray(cards) || cards.length === 0) {
       return null;
     }
-    const all = cards.every((c: any) => typeof c?.flowId === "number" && c.flowId > 0);
+    const all = cards.every(cardBooked);
     return all ? cards.length : null;
   } catch {
     return null;

@@ -13,8 +13,8 @@
 
 import prisma from "~~/server/lib/prisma";
 import { buildSystemPrompt, buildTitlePrompt } from "~~/server/utils/chat/prompt";
-import { buildImageNumbering, type ChatTurn, type ImageWindowOpts } from "~~/server/utils/chat/history";
-import type { DraftFlow } from "~~/server/utils/chat/flows";
+import { buildImageNumbering, cardBooked, type ChatTurn, type ImageWindowOpts } from "~~/server/utils/chat/history";
+import { moneyOf, type DraftFlow } from "~~/server/utils/chat/flows";
 import { chatOnce, type OllamaCfg } from "~~/server/utils/chat/ollama";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -48,16 +48,6 @@ const ownSession = async (userId: number, sessionId: number) => {
 /** 追加消息后统一刷新 updateDate——会话列表按它倒序 */
 const touchSession = (sessionId: number) =>
   prisma.chatSession.update({ where: { id: sessionId }, data: { updateDate: new Date() } });
-
-/** 金额归一：数字且 ≥0 收下，否则 0（与 normalizeFlows 的 moneyOf 同口径） */
-const moneyOf = (v: unknown): number => {
-  const n = Number(v);
-  return Number.isFinite(n) && n >= 0 ? n : 0;
-};
-
-/** 卡片「已入账」判定（与 history 折叠语义同一口径） */
-const hasFlowId = (c: unknown): boolean =>
-  typeof (c as { flowId?: unknown })?.flowId === "number" && (c as { flowId: number }).flowId > 0;
 
 /** 上海时区的今天：YYYY-MM-DD（now 可注入，测试钉跨日边界） */
 export const todayOf = (now: Date = new Date()): string =>
@@ -99,15 +89,21 @@ export const deleteSession = async (userId: number, sessionId: number, dataDir: 
     select: { invoice: true },
   });
   const referenced = new Set(flows.map((f) => f.invoice ?? "").flatMap((v) => v.split(",")));
-  await Promise.all(
-    candidates
-      .filter((n) => !referenced.has(n))
-      .map((n) => fs.unlink(path.join(imagesDir(dataDir), n)).catch((e: NodeJS.ErrnoException) => {
-        if (e?.code !== "ENOENT") {
-          throw e;
-        }
-      }))
-  );
+
+  // 删除（DB）已提交；文件清理是收尾活，失败绝不能让本该成功的删除反着报错
+  //（ENOENT 直接忽略，其余记日志吞掉——残留文件的损失小于删除请求 500）
+  for (const n of candidates) {
+    if (referenced.has(n)) {
+      continue;
+    }
+    try {
+      await fs.unlink(path.join(imagesDir(dataDir), n));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        console.error(`[chat] 会话 ${sessionId} 的小票 ${n} 清理失败`, e);
+      }
+    }
+  }
 };
 
 // ==================== 消息 ====================
@@ -172,7 +168,7 @@ const distinctFlowCol = async (bookId: string, userId: number, col: "industryTyp
   ];
 };
 
-/** 最近几条流水摘要注入 system prompt（口径参考，也防模型把已记的流水再记一遍） */
+/** 最近几天流水摘要注入 system prompt（口径参考，也防模型把已记的流水再记一遍） */
 const recentFlowSummary = (
   flows: Array<{ day: string; flowType: string | null; name: string | null; money: number | null }>
 ): string[] => {
@@ -180,7 +176,8 @@ const recentFlowSummary = (
     return [];
   }
   const lines = flows.map((f) =>
-    [f.day, f.flowType || "支出", f.name || "未命名流水", f.money !== null && f.money !== undefined ? `${f.money}元` : ""]
+    // 不编造方向：flowType 为空就写「未分类」，不替模型猜支出/收入
+    [f.day, f.flowType || "未分类", f.name || "未命名流水", f.money !== null && f.money !== undefined ? `${f.money}元` : ""]
       .filter(Boolean)
       .join(" ")
   );
@@ -205,7 +202,7 @@ export const getContext = async (
     distinctFlowCol(bookId, userId, "attribution"),
     prisma.flow.findMany({
       where: { bookId, userId },
-      orderBy: { id: "desc" },
+      orderBy: [{ day: "desc" }, { id: "desc" }], // 「最近」按 day 读，回补旧流水不冒充最新
       take: RECENT_FLOW_COUNT,
     }),
   ]);
@@ -285,23 +282,27 @@ export const saveCard = async (
   index: number,
   card: DraftFlow,
   bookId: string
-): Promise<{ flowId: number }> => {
-  const msg = await prisma.chatMessage.findFirst({ where: { id: messageId, userId } });
-  if (!msg) {
-    throw new Error("消息不存在");
-  }
-  const cards = parseCards(msg.flows);
-  if (msg.role !== "assistant" || !cards) {
-    throw new Error("该消息没有可入账的卡片");
-  }
-  if (!Number.isInteger(index) || index < 0 || index >= cards.length) {
-    throw new Error("卡片不存在");
-  }
-  if (hasFlowId(cards[index])) {
-    throw new Error("该卡片已入账");
-  }
+): Promise<{ flowId: number }> =>
+  // 行锁 + 全部读/校验/回写都在同一事务里：flows 是「读快照-整体回写 JSON」，
+  // 只在事务里才能挡住并发保存（双击、两卡并点）互相覆盖丢 flowId 或重复建卡。
+  prisma.$transaction(async (tx) => {
+    // 排他锁排队：并发的 save 卡在这等，等到的就是别人已提交的最新 flows
+    await tx.$queryRaw`SELECT "id" FROM "ChatMessage" WHERE "id" = ${messageId} AND "userId" = ${userId} FOR UPDATE`;
+    const msg = await tx.chatMessage.findFirst({ where: { id: messageId, userId } });
+    if (!msg) {
+      throw new Error("消息不存在");
+    }
+    const cards = parseCards(msg.flows);
+    if (msg.role !== "assistant" || !cards) {
+      throw new Error("该消息没有可入账的卡片");
+    }
+    if (!Number.isInteger(index) || index < 0 || index >= cards.length) {
+      throw new Error("卡片不存在");
+    }
+    if (cardBooked(cards[index])) {
+      throw new Error("该卡片已入账");
+    }
 
-  const created = await prisma.$transaction(async (tx) => {
     const flow = await tx.flow.create({
       data: {
         userId,
@@ -320,16 +321,13 @@ export const saveCard = async (
     cards[index] = { ...cardForJson(card), flowId: flow.id };
 
     // 状态派生：全部卡片都有 flowId → 1，否则 0（与 history 的折叠判定同口径）
-    const allSaved = cards.every(hasFlowId);
+    const allSaved = cards.every(cardBooked);
     await tx.chatMessage.update({
       where: { id: msg.id },
       data: { flows: JSON.stringify(cards), status: allSaved ? 1 : 0 },
     });
-    return flow;
+    return { flowId: flow.id };
   });
-
-  return { flowId: created.id };
-};
 
 // ==================== 会话标题 ====================
 
@@ -372,6 +370,9 @@ export const ensureTitle = async (
 
 export type SaveImageFile = { ext: string; data: Buffer };
 
+/** ext 白名单：最多 1 个前导点 + 1~5 位字母数字（防 ../ 之类的目录穿越写盘） */
+const EXT_RE = /^\.?[a-zA-Z0-9]{1,5}$/;
+
 /** 存小票图：文件名 chat-{sessionId}-{ts}-{n}.{ext}，返回落地的文件名列表 */
 export const saveImages = async (
   userId: number,
@@ -380,20 +381,26 @@ export const saveImages = async (
   dataDir: string
 ): Promise<string[]> => {
   await ownSession(userId, sessionId);
+  // 先全量校验再动盘：任何一项非法都整体不开写（返回的名单恒与入参等长）
+  for (const f of files) {
+    if (!f || !Buffer.isBuffer(f.data) || f.data.length === 0) {
+      throw new Error("图片数据无效");
+    }
+    if (!EXT_RE.test(String(f.ext ?? ""))) {
+      throw new Error("图片扩展名不合法");
+    }
+  }
   const dir = imagesDir(dataDir);
   await fs.mkdir(dir, { recursive: true });
   const ts = Date.now();
   const names: string[] = [];
-  for (const f of files) {
-    if (!f || !Buffer.isBuffer(f.data) || f.data.length === 0) {
-      continue;
-    }
-    let ext = String(f.ext ?? "").trim();
+  for (let i = 0; i < files.length; i++) {
+    let ext = String(files[i].ext ?? "").trim();
     if (ext && !ext.startsWith(".")) {
       ext = "." + ext;
     }
-    const name = `chat-${sessionId}-${ts}-${names.length + 1}${ext}`;
-    await fs.writeFile(path.join(dir, name), f.data);
+    const name = `chat-${sessionId}-${ts}-${i + 1}${ext}`;
+    await fs.writeFile(path.join(dir, name), files[i].data);
     names.push(name);
   }
   return names;

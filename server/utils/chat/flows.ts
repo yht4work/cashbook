@@ -108,7 +108,8 @@ const isRealDay = (v: string): boolean => {
 const dayOf = (v: unknown, fallback: string): string =>
   typeof v === "string" && isRealDay(v) ? v : fallback;
 
-const moneyOf = (v: unknown): number => {
+/** 金额归一：数字且 ≥0 收下，否则 0（导出给 chat/service.saveCard 同口径） */
+export const moneyOf = (v: unknown): number => {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 ? n : 0;
 };
