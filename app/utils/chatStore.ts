@@ -95,6 +95,12 @@ const imageBlobCache = new Map<string, string>();
  * doApi.download（内部按项目惯例从 cookie 取 Authorization 放头）
  * 拿 blob 再 URL.createObjectURL。失败返回 null（调用方占位/隐藏），已成功的
  * 文件名复用缓存；blob 由页面级缓存持有，不随单卡卸载 revoke。
+ *
+ * 注意 show 的失败形态是「HTTP 200 + JSON 错误包」（鉴权失效时 middleware 返
+ * {c:400,m:"No Authorization"}）——$fetch 的 blob 直接命中它，这种 blob 不能
+ * createObjectURL 当图片用（否则缓存成一张「JSON 图」，占位永远不自愈）：这里
+ * 按 JSON/文本类型判失败返回 null；且 null 不入缓存，之后登录态修好重新调用
+ * 即会重新请求（自愈）。
  */
 export const chatImageBlob = (name: string): Promise<string | null> => {
   const key = String(name ?? "");
@@ -107,7 +113,12 @@ export const chatImageBlob = (name: string): Promise<string | null> => {
   }
   return doApi
     .download("api/entry/flow/invoice/show", { invoice: key })
-    .then((blob: Blob | null) => (blob ? URL.createObjectURL(blob) : null))
+    .then((blob: Blob | null) => {
+      const t = String(blob?.type ?? "");
+      return blob instanceof Blob && !t.startsWith("text/") && !t.includes("application/json")
+        ? URL.createObjectURL(blob)
+        : null;
+    })
     .then((url) => {
       if (url) {
         imageBlobCache.set(key, url);

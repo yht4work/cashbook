@@ -37,10 +37,17 @@ interface Props {
   index: number;
   messageId: number;
   editing?: boolean;
+  /** 本消息行仍在流式生成（行 id 未固化=0：入账必被「卡片数据无效」拒，
+   *  编辑会在 done 后的重挂中丢）——此时卡片动作整体禁用 */
+  streaming?: boolean;
+  /** 勾选池上下文：本消息各卡的小票 + 源 user 行的图（可给本卡补挂/取消） */
+  ctxInvoices?: string[];
 }
 
 const props = withDefaults(defineProps<Props>(), {
   editing: false,
+  streaming: false,
+  ctxInvoices: () => [],
 });
 
 const store = useChatStore();
@@ -66,14 +73,22 @@ const draft = ref<DraftFlow>({
   invoices: [...props.card.invoices],
 });
 
-/** 父级替换 card（入账回写 flowId / 消息刷新）→ 草稿对齐新值；已入则收起编辑 */
+/** 父级替换 card 对齐状态：已入则收起编辑并对齐（回写 flowId）；未入则只在未编辑时对齐 */
 watch(
   () => props.card,
-  () => {
+  (c) => {
     if (booked.value) {
       editing.value = false;
+      draft.value = { ...c, invoices: [...c.invoices] };
+      return;
     }
-    draft.value = { ...props.card, invoices: [...props.card.invoices] };
+    if (editing.value) {
+      // 编辑中的未入账卡：行对象重建（如本会话另一轮 send 收尾的 loadMessages 会
+      // 重建全部行、换成新的 card 对象，内容还是入账前原值）——不回灌，保住用户
+      // 未提交的编辑，否则刷新会静默回退编辑、接着入账会把回退值记进去。
+      return;
+    }
+    draft.value = { ...c, invoices: [...c.invoices] };
   }
 );
 
@@ -102,17 +117,37 @@ const loadOne = (name: string): void => {
   });
 };
 
-/** 编辑态可勾选的小票全集：进入编辑时以卡上现有文件名为准，勾掉也不消失 */
-const pool = ref<string[]>([]);
-
-watch(editing, (v) => {
-  if (v) {
-    pool.value = [...new Set([...draft.value.invoices])];
-    for (const n of pool.value) {
-      loadOne(n);
+/**
+ * 编辑态可勾选的小票全集（reactive 计算值）：卡上现有 + ctxInvoices（本消息
+ * 其他卡的小票与源 user 行的图）——勾掉的文件仍留在 draft.invoices，不会从
+ * 池里消失；别的卡/源消息的小票也可给本卡补挂（spec：入账前用户可增删小票，
+ * AI 常把票只挂到部分卡上，两个方向都要能给）。
+ */
+const pool = computed<string[]>(() => {
+  const set = new Set<string>();
+  for (const n of props.ctxInvoices) {
+    if (n) {
+      set.add(String(n));
     }
   }
+  for (const n of draft.value.invoices) {
+    if (n) {
+      set.add(String(n));
+    }
+  }
+  return [...set];
 });
+
+// 池内缩略按需装载（失败的进 loadFailed 占位；null 不入缓存，重开编辑会重试）
+watch(
+  pool,
+  (names) => {
+    for (const n of names) {
+      loadOne(n);
+    }
+  },
+  { immediate: true }
+);
 
 // 概览缩略（含已入卡回显的入账小票）随 card.invoices 变化装载
 watch(
@@ -308,8 +343,8 @@ const payload = (): DraftFlow => ({
 });
 
 const onBook = async (): Promise<void> => {
-  if (booked.value || saving.value) {
-    return; // 已入卡/进行中不再发请求（服务端同样以「该卡片已入账」闭环）
+  if (booked.value || saving.value || props.streaming) {
+    return; // 已入卡/进行中/流式中（行 id 未固化必被拒）不再发请求（服务端同样以「该卡片已入账」闭环）
   }
   // 入账目标账本 = 卡片上最终选择；没进过编辑（概览直接入账）时回退当前账本
   const book = selectedBook.value || localStorage.getItem("bookId") || "";
@@ -332,8 +367,8 @@ const onBook = async (): Promise<void> => {
 };
 
 const openEdit = (): void => {
-  if (booked.value) {
-    return; // 已入卡锁定：不进编辑
+  if (booked.value || props.streaming) {
+    return; // 已入卡锁定；流式中（行 id 未固化）也不可编辑——done 后会重挂丢编辑
   }
   draft.value = { ...props.card, invoices: [...props.card.invoices] };
   editing.value = true;
@@ -345,6 +380,8 @@ const openEdit = (): void => {
 const cancelEdit = (): void => {
   draft.value = { ...props.card, invoices: [...props.card.invoices] };
   editing.value = false;
+  // 收起=取消编辑：本次选过的账本一并作废（否则之后概览里直接入账会吃进已放弃的选择）
+  selectedBook.value = "";
 };
 
 const loadCandidates = (): void => {
@@ -661,7 +698,7 @@ const flowLink = computed(() =>
         <button
           type="button"
           data-chat-card-save
-          :disabled="saving || booked"
+          :disabled="saving || booked || streaming"
           class="rounded-md bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-500 disabled:cursor-not-allowed disabled:bg-brand-600/50"
           @click="onBook"
         >
@@ -676,7 +713,8 @@ const flowLink = computed(() =>
         v-if="!booked"
         type="button"
         data-chat-card-edit
-        class="inline-flex items-center gap-1 rounded-md border border-frame px-2.5 py-1 text-xs font-medium text-ink-secondary hover:bg-surface-muted dark:border-frame-dark dark:text-ink-onDark dark:hover:bg-surface-darkMuted"
+        :disabled="streaming"
+        class="inline-flex items-center gap-1 rounded-md border border-frame px-2.5 py-1 text-xs font-medium text-ink-secondary hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50 dark:border-frame-dark dark:text-ink-onDark dark:hover:bg-surface-darkMuted"
         @click="openEdit"
       >
         <PencilSquareIcon class="h-3.5 w-3.5" />
@@ -696,7 +734,7 @@ const flowLink = computed(() =>
         v-else
         type="button"
         data-chat-card-save
-        :disabled="saving"
+        :disabled="saving || streaming"
         class="flex-shrink-0 rounded-md bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-500 disabled:cursor-not-allowed disabled:bg-brand-600/50"
         @click="onBook"
       >

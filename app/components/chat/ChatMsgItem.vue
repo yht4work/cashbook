@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { ExclamationTriangleIcon } from "@heroicons/vue/24/outline";
-import { chatImageBlob, type ChatMessageItem } from "~/utils/chatStore";
+import { chatImageBlob, useChatStore, type ChatMessageItem } from "~/utils/chatStore";
 /* 显式 import（Nuxt dev 自动导入不收编新组件） */
 import ChatDraftCard from "~/components/chat/ChatDraftCard.vue";
 
@@ -22,7 +22,39 @@ interface Props {
 
 const props = defineProps<Props>();
 
+const store = useChatStore();
+
 const isUser = computed(() => props.msg.role === "user");
+
+/**
+ * 卡片勾选池上下文：本消息所有卡的小票 ∪ 源 user 行的图（产生本轮消息的上一行）。
+ * AI 常把同一张小票只挂到部分卡上（或干脆不挂），spec 要求入账前用户可在卡片上
+ * 增删小票——两个方向都要给到，所以池从整个消息上下文取全集。
+ */
+const ctxInvoices = computed<string[]>(() => {
+  if (!props.msg.flowCards?.length) {
+    return [];
+  }
+  const all = new Set<string>();
+  for (const c of props.msg.flowCards) {
+    for (const n of c.invoices || []) {
+      if (n) {
+        all.add(String(n));
+      }
+    }
+  }
+  const rows = store.currentMessages;
+  const i = rows.indexOf(props.msg);
+  const prev = i > 0 ? rows[i - 1] : null;
+  if (prev && prev.role === "user") {
+    for (const n of prev.imageList) {
+      if (n) {
+        all.add(n);
+      }
+    }
+  }
+  return [...all];
+});
 
 /** content 首部 trim：历史行可能带残留前导空行/空格；流式行同口径 */
 const textOf = computed<string>(() => (props.msg.content ?? "").replace(/^\s+/, ""));
@@ -177,6 +209,8 @@ const onThumbError = (key: string): void => {
             :card="c"
             :index="i"
             :message-id="msg.id"
+            :streaming="!!msg.streaming"
+            :ctx-invoices="ctxInvoices"
           />
         </div>
       </div>
