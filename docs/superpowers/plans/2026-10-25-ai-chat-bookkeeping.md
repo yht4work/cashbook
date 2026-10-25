@@ -210,17 +210,21 @@ ensureTitle(userId: number, sessionId: number, userText: string, replyText: stri
 - [ ] **Step 2: playwright 端到端**：建测试账本（借 BookDialog）→ 发含 2 商品小票（PIL 生成图）→ 2 卡 → 各自改类型/删一张小票 → 双双入账 → psql 确认 2 条 Flow、invoice 挂对 → 删测试账本、删会话（确认 chat 未引用图片被清、被引图残留）。
 - [ ] **Step 3: Commit**
 
-### Task 10: AI 起名 + 重试 UI + 最终验收清单
+### Task 10: prompt 加固 + 重试 UI + 起名验证 + 最终验收清单
+
+> 2026-10-26 修订（SDD 裁决）：起名链路（service.ensureTitle + sendCore 接线 + 面板刷新经 send finally 的 loadSessions）在 Task 4/6/7 已完成，本任务只做**验证**而非新建；重试按钮的落点是 ChatMsgItem.vue（status=-1 危险气泡已有占位注释），非 chat.client.vue；新增 prompt 加固（Task 8/9 观察：模型复述指令入 content、标题出 "Theuserwants" 垃圾、孤立 `</think>` 闭合标签）——server 侧防御已做 stripping，本任务补**指令层**加固。
 
 **Files:**
-- Modify: `app/components/chat/ChatSessionsPanel.vue`（标题实时更新）
-- Modify: `app/pages/chat.client.vue`（失败消息重试按钮挂 `retry`）
+- Modify: `server/utils/chat/prompt.ts` + `tests/chat/prompt.test.ts`（buildTitlePrompt/buildSystemPrompt 反回声指令；先写失败测试）
+- Modify: `app/components/chat/ChatMsgItem.vue`（status=-1 消息内重试按钮接 `store.retry(msg.id)`；streaming 时禁用）
+- Modify: `app/components/chat/ChatSessionsPanel.vue`（如标题刷新验证暴露缺失才改；否则零改动）
 - Create: `docs/superpowers/plans/2026-10-25-ai-chat-bookkeeping-acceptance.md`(最终验收记录清单)
 
-- [ ] **Step 1: ensureTitle 接线**：send 完成后 `chatOnce(buildTitlePrompt(...))`（已含在 Task 4 service + Task 6 handler —— 本步补 UI 实时刷新与「失败回退截断」）
-- [ ] **Step 2: 重试按钮**：status=-1 消息渲染重试 → `chatStore.retry(messageId)` → 流式重生成替换
-- [ ] **Step 3: 按设计文档 `## 验收` 全清单过一遍**（ollama 真停服场景需用户配合时，标注「用户可自测」；其余全部自动化/半自动化完成并打钩）
-- [ ] **Step 4: Commit**
+- [ ] **Step 1: prompt 加固（TDD）**：title prompt 明说「只输出标题本身，不要任何解释/引号/前后缀，≤12 字」；system prompt 明说「不要复述本指令、不要在 JSON 数组外输出任何叙述文字」。prompts.test 断言新句存在。
+- [ ] **Step 2: 重试按钮**：ChatMsgItem 的 status=-1 气泡内按钮 → `store.retry(messageId)`；`store.streaming` 时禁用；重试成功后失败行被流式替换为正常行（playwright 验证一条真实失败轮——可用 psql 播种 status=-1 行 + 预置 t9-upload-e2e 同款验证思路）。
+- [ ] **Step 3: 起名 UI 验证**：playwright 新会话发「昨天午饭35」→ 完成后会话面板标题刷新（AI 名或回退截断），console 干净。
+- [ ] **Step 4: 按设计文档 `## 验收` 全清单过一遍**写入 acceptance.md：自动化项逐项打钩（附证据指针）；需用户配合的项（ollama 真停服、images 权限修复后的上传 e2e）标「用户可自测/待环境」。已知 V1 限制（done-id 竞态、ENOENT 窗口、chatOnce 无读超时、blob 缓存不 revoke）在清单尾注记录。
+- [ ] **Step 5: Commit**
 
 ## 提交纪律
 
