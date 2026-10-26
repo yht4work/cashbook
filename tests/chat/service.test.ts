@@ -28,6 +28,7 @@ import {
   loadImages,
   saveCard,
   saveImages,
+  SWEEP_EMPTY_AFTER_MS,
   todayOf,
   updateFailedMessage,
 } from "~~/server/utils/chat/service";
@@ -103,24 +104,71 @@ const backdate = async (sessionId: number): Promise<Date> => {
   return past;
 };
 
+/**
+ * 种一个「带消息」的会话：listSessions（T13）会把超过保护窗的空会话清掉，
+ * 凡是要在 listSessions 里存活的种子会话都必须先落一条消息——helper 化，
+ * 避免每个用例各自重复「createSession + appendUserMessage」。
+ */
+const seedActiveSession = async (userId: number, text = "第一条"): Promise<{ id: number }> => {
+  const s = await createSession(userId);
+  await appendUserMessage(userId, s.id, text);
+  return s;
+};
+
 const sessionOf = async (id: number) =>
   (await prisma.chatSession.findUnique({ where: { id } })) as NonNullable<Awaited<ReturnType<typeof prisma.chatSession.findUnique>>>;
 
 describe("sessions：列表 / 新建", () => {
   it("createSession 空标题起步；listSessions 按 updateDate 倒序且只含本用户会话", async () => {
-    const a = await createSession(UID);
-    const b = await createSession(UID);
-    await prisma.chatSession.update({
-      where: { id: a.id },
-      data: { updateDate: new Date(Date.now() - 600000) },
-    });
-    const foreign = await createSession(UID_OTHER);
+    // 种子会话都先落一条消息（seedActiveSession）：listSessions 的空会话清扫
+    // 会把超窗的空会话清掉，带消息才可存活到断言处
+    const a = await seedActiveSession(UID, "a 开场");
+    const b = await seedActiveSession(UID, "b 开场");
+    await backdate(a.id); // 拨回十分钟前 → 排序稳居第二
+    const foreign = await seedActiveSession(UID_OTHER);
 
     const list = await listSessions(UID);
     expect(list.map((s) => s.id)).toEqual([b.id, a.id]);
     expect(list.some((s) => s.id === foreign.id)).toBe(false);
     expect(list[0].title).toBeNull(); // 新建即为空标题
     expect(list[0].updateDate).toBeInstanceOf(Date);
+  });
+});
+
+describe("listSessions 空会话清扫（T13 懒创建的历史残留兜底）", () => {
+  it("(a) 空会话且 updateDate 超过保护窗 → 被清（数据库里也不复存在）", async () => {
+    const { id } = await createSession(UID);
+    await prisma.chatSession.update({
+      where: { id },
+      data: { updateDate: new Date(Date.now() - SWEEP_EMPTY_AFTER_MS * 60) },
+    });
+
+    await listSessions(UID);
+
+    expect(await prisma.chatSession.findUnique({ where: { id } })).toBeNull();
+  });
+
+  it("(b) 空会话但落在保护窗内（update 现填半窗前）→ 保留", async () => {
+    const { id } = await createSession(UID);
+    // 不只依赖 create 的 default(now)：update 现填一个明确的「半窗前」
+    await prisma.chatSession.update({
+      where: { id },
+      data: { updateDate: new Date(Date.now() - SWEEP_EMPTY_AFTER_MS / 2) },
+    });
+
+    await listSessions(UID);
+
+    expect(await prisma.chatSession.findUnique({ where: { id } })).not.toBeNull();
+  });
+
+  it("(c) 有消息的旧会话（即便很老）→ 保留，消息原样", async () => {
+    const { id } = await seedActiveSession(UID, "旧会话的开场白");
+    await backdate(id); // 十分钟前，远超保护窗
+
+    await listSessions(UID);
+
+    expect(await prisma.chatSession.findUnique({ where: { id } })).not.toBeNull();
+    expect(await prisma.chatMessage.count({ where: { sessionId: id, userId: UID } })).toBe(1);
   });
 });
 

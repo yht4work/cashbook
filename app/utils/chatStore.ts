@@ -349,7 +349,11 @@ export const useChatStore = defineStore("chat", {
       }
     },
 
-    /** 新建会话并选中新会话（清空消息区，等第一条消息） */
+    /**
+     * 新建会话并选中新会话（清空消息区，等第一条消息）。
+     * T13 懒创建后不再被「新建」钮直接调用——只作为 send 的建档原语：
+     * 草稿态首次发送时才走到这里，会话从根上只随首次落库而生。
+     */
     async createSession(): Promise<number | null> {
       const d = await doApi.post<{ id: number }>("api/entry/chat/sessions");
       const id = Number(d?.id) || 0;
@@ -361,6 +365,16 @@ export const useChatStore = defineStore("chat", {
       this.currentId = id;
       this.messages = [];
       return id;
+    },
+
+    /**
+     * 进草稿态（T13「新建」的新语义）：不落库、不动 sessions 列表，仅清空
+     * 当前消息区；首次 send 才经 createSession 真正建档。草稿与「没选会话」
+     * 是同一形态（currentId=null），UI 上空态引导与 titleOf 兜底都按此走。
+     */
+    startDraft(): void {
+      this.currentId = null;
+      this.messages = [];
     },
 
     /**
@@ -379,6 +393,28 @@ export const useChatStore = defineStore("chat", {
           this.messages = [];
         }
       }
+    },
+
+    /**
+     * 批量删除会话（T12 多选清理）：POST batchDelete → 本地滤掉这些 id。
+     * currentId 命中清除集时直接落回草稿态，不像 deleteSession 那样自动转选
+     * 下一个——一次清掉的可能就是整批，逐个转选只会徒劳加载。返回服务端
+     * 实际删除数（别人的/已消失的 id 被服务端逐个跳过，UI 提示以此为准）。
+     */
+    async batchDeleteSessions(ids: number[]): Promise<number> {
+      const wanted = (ids ?? []).map((i) => Number(i) || 0).filter((i) => i > 0);
+      const d = await doApi.post<{ deleted: number }>(
+        "api/entry/chat/sessions/batchDelete",
+        { ids: wanted }
+      );
+      const deleted = Number(d?.deleted) || 0;
+      const gone = new Set(wanted);
+      this.sessions = this.sessions.filter((s) => !gone.has(s.id));
+      if (this.currentId !== null && gone.has(this.currentId)) {
+        this.currentId = null;
+        this.messages = [];
+      }
+      return deleted;
     },
 
     /** 会话消息（行 id 升序）；同时把它置为当前会话（点击选中 → loadMessages） */
@@ -418,17 +454,15 @@ export const useChatStore = defineStore("chat", {
      * 帧挂上卡片、done 固化该行（真实 messageId/id）并回读服务端事实；
      * fail 落一条 status=-1 行。全程 streaming 状态锁输入。
      * 返回 boolean（终审 M8）：true=通过预检、请求已发出（调用方可清输入），
-     * false=被前置校验拦下（锁输入/无会话/无账本/空消息，未发请求）。
+     * false=被前置校验拦下（锁输入/无账本/空消息，未发请求）。
+     * 懒创建（T13）：currentId=null（草稿态）时先建档再发——会话只随首次
+     * 发送产生，失败上抛时输入保留。
      */
     async send(text: string, files?: File[] | null): Promise<boolean> {
       if (this.streaming) {
         return false; // 锁输入：并发发送会造成 done 帧的 id 竞态（V1 已知限制）
       }
-      const sessionId = Number(this.currentId) || 0;
-      if (!sessionId) {
-        Alert.error("请先新建会话");
-        return false;
-      }
+      // 本地预检先于建档：账本/空消息不过关时不新建任何会话（现有失败语义不变）
       const bookId = bookIdOf();
       if (!bookId) {
         Alert.error("请先选择账本");
@@ -442,6 +476,16 @@ export const useChatStore = defineStore("chat", {
         Alert.error("消息不能为空");
         return false;
       }
+      // 懒创建（T13）：草稿态（currentId=null）首次发送才真正建档，从此不再有
+      // 「从未发过言的空会话」。建档失败（未登录/网络）原样上抛——send 载体是
+      // await store.send，调用方按现有约定保留输入。流式期间输入已整体锁定，
+      // 天然挡住重复建会话，无需再加锁。
+      if (!this.currentId) {
+        // 注意：createSession 返回的是裸 id（number），不是 {id} 对象；
+        // 且失败（未登录/网络/拿不到 id）时它自己 throw——走到这里 id 必有效
+        this.currentId = await this.createSession();
+      }
+      const sessionId = Number(this.currentId) || 0;
 
       const fd = new FormData();
       fd.append("sessionId", String(sessionId));

@@ -31,6 +31,9 @@ const CHAT_FILE_PREFIX = "chat-";
 /** 注入 system prompt 的最近流水条数（摘要兜底，帮助模型参考记账口径） */
 const RECENT_FLOW_COUNT = 5;
 
+/** 空会话清扫保护窗：updateDate 落后该时长以上的空会话才清（见 listSessions 注释） */
+export const SWEEP_EMPTY_AFTER_MS = 60_000;
+
 // ==================== 小工具 ====================
 
 /** images 目录 = <dataDir>/images（与 flow/invoice upload 的落点一致） */
@@ -55,12 +58,28 @@ export const todayOf = (now: Date = new Date()): string =>
 
 // ==================== 会话 ====================
 
-export const listSessions = (userId: number): Promise<Array<{ id: number; title: string | null; updateDate: Date }>> =>
-  prisma.chatSession.findMany({
+export const listSessions = async (
+  userId: number
+): Promise<Array<{ id: number; title: string | null; updateDate: Date }>> => {
+  // 空会话清扫（T13 懒创建的历史残留兜底）：懒创建后「正常」已不可能再出现
+  // 非草稿的空会话——send 的第一件事就是写 user 行，所以这里清的全是升级前
+  // 点过「新建」又没发言的存量行。60s 保护窗防跨标签页在途竞速：A 标签刚建
+  // 完会话还没来得及落 user 行时，B 标签刷列表不至于把 A 的半途会话清掉。
+  // 副作用是兜底行为：幂等（条件不命中即 0 行）、且只在本人的会话里清——
+  // 没有任何内容可丢（无消息）。
+  await prisma.chatSession.deleteMany({
+    where: {
+      userId,
+      messages: { none: {} }, // 关系字段名是 messages（schema.prisma），不是表名
+      updateDate: { lt: new Date(Date.now() - SWEEP_EMPTY_AFTER_MS) },
+    },
+  });
+  return prisma.chatSession.findMany({
     where: { userId },
     orderBy: { updateDate: "desc" },
     select: { id: true, title: true, updateDate: true },
   });
+};
 
 export const createSession = async (userId: number): Promise<{ id: number }> => {
   const s = await prisma.chatSession.create({ data: { userId } }); // title 留 null（空标题起步）

@@ -23,11 +23,13 @@ interface PendingPreview {
 }
 const pendings = ref<PendingPreview[]>([]);
 
-/** 是否可发送：非流式 + 已选会话 + 文本/图片至少有一 */
+/**
+ * 是否可发送：非流式 + 文本/图片至少有一。T13 懒创建后草稿态（currentId=null）
+ * 也能发——send 会先建档；不再以「有没有会话」为前置。
+ */
 const canSend = computed(
   () =>
     !store.streaming &&
-    !!store.currentId &&
     (text.value.trim().length > 0 || pendings.value.length > 0)
 );
 
@@ -35,9 +37,7 @@ const placeholder = computed<string>(() => {
   if (store.streaming) {
     return "生成中…";
   }
-  if (!store.currentId) {
-    return "先新建会话，再开始记账";
-  }
+  // 草稿态与正常态同一占位（懒创建后草稿态可以直接开口，不再提示「先新建会话」）
   return "拍张小票，或说：昨天午饭 35";
 });
 

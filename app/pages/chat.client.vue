@@ -54,14 +54,11 @@ const closeSessionsPanel = () => {
   sessionDrawer.value = false;
 };
 
-const toCreate = async () => {
-  try {
-    await store.createSession();
-  } catch {
-    // toast 已提示（多为 未登录/网络 错误）
-  }
+/** 「新建会话」的新语义（T13 懒创建）：只进草稿态，不落库、无请求可失败 */
+const toCreate = () => {
+  store.startDraft();
   if (isMobile.value) {
-    sessionDrawer.value = false; // 新建后回消息区
+    sessionDrawer.value = false; // 回消息区
   }
 };
 
@@ -155,7 +152,7 @@ const titleOf = (): string => {
 
       <!-- 消息区：消息流（Task 8）+ 输入区（Task 8）+ 空态引导；卡片 Task 9 挂进 ChatMsgItem -->
       <section id="chat-msg-area" class="flex flex-1 min-h-0 flex-col overflow-hidden">
-        <!-- 空态引导（未选会话 / 空会话仍显示） -->
+        <!-- 空态引导（草稿态 / 空会话同一文案：懒创建后直接开口即建档，T13） -->
         <div
           v-if="!store.currentId || store.currentMessages.length === 0"
           class="flex min-h-0 flex-1 flex-col items-center justify-center px-6 py-10 text-center"
@@ -166,20 +163,13 @@ const titleOf = (): string => {
             <ChatBubbleLeftRightIcon class="h-8 w-8 text-brand-500" />
           </div>
           <p class="text-ink-primary dark:text-ink-onDark font-medium mb-2">
-            {{ store.currentId ? "发一句话试试" : "先新建一个会话" }}
+            发一句话试试
           </p>
           <p
             class="text-sm text-ink-muted dark:text-ink-onDark/70 max-w-md leading-relaxed"
           >
             拍张小票扔进来，或直接说：昨天午饭 35
           </p>
-          <button
-            v-if="!store.currentId"
-            class="mt-6 px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-md text-sm font-medium transition-colors"
-            @click="toCreate"
-          >
-            新建会话
-          </button>
         </div>
         <!-- 消息流（滚动 + 自动跟随，见组件注释） -->
         <ChatMsgList v-else />

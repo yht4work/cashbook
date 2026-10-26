@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref, computed } from "vue";
 import {
+  CheckCircleIcon,
+  CheckIcon,
   ChatBubbleLeftRightIcon,
   PlusIcon,
   TrashIcon,
@@ -11,9 +13,10 @@ import { Confirm } from "~/utils/confirm";
 import { Alert } from "~/utils/alert";
 
 /**
- * 会话面板：列表（title || 未命名会话）、新建、删除（GlobalConfirm）。
- * 点击选中 → store.loadMessages（选中即加载消息）。
- * 桌面直接嵌在 /chat 左栏；移动端由父级套抽屉壳，mobile=true 时多渲染关闭钮。
+ * 会话面板：列表（title || 未命名会话）、新建、删除（GlobalConfirm）、
+ * 多选批量清理（T12：勾选后一次走 batchDelete 端点）。
+ * 点击选中 → store.loadMessages（选中即加载消息）；多选态下点行=反选。
+ * 「新建」（T13 懒创建）：只进草稿态，不落库。
  */
 
 interface Props {
@@ -29,6 +32,38 @@ const emit = defineEmits<{
 const store = useChatStore();
 const loading = ref(false); // 注意：模板里也用于列表骨架
 const firstSession = computed(() => store.sessions[0] ?? null);
+
+// T12 多选态：勾选集用数组（模板里 length/includes 直读，免上 Set）
+const selecting = ref(false);
+const checked = ref<number[]>([]);
+const checkedCount = computed(() => checked.value.length);
+
+const enterSelect = (): void => {
+  selecting.value = true;
+  checked.value = [];
+};
+
+const exitSelect = (): void => {
+  selecting.value = false;
+  checked.value = [];
+};
+
+const toggleSelect = (): void => {
+  if (selecting.value) {
+    exitSelect();
+  } else {
+    enterSelect();
+  }
+};
+
+const toggleChecked = (id: number): void => {
+  const at = checked.value.indexOf(id);
+  if (at >= 0) {
+    checked.value.splice(at, 1);
+  } else {
+    checked.value.push(id);
+  }
+};
 
 // 首次挂载拉列表并自动选中最近一个会话；桌面常驻、移动抽屉打开时都会触发
 const init = async () => {
@@ -48,6 +83,11 @@ onMounted(init);
 const titleOf = (item: ChatSessionItem): string => item.title || "未命名会话";
 
 const select = (item: ChatSessionItem) => {
+  // 多选态：点行=反选，不进会话（checkbox 本身就是这行的行首元素）
+  if (selecting.value) {
+    toggleChecked(item.id);
+    return;
+  }
   if (!item.id || item.id === store.currentId) {
     return;
   }
@@ -58,12 +98,9 @@ const select = (item: ChatSessionItem) => {
   }
 };
 
-const toCreate = async () => {
-  try {
-    await store.createSession();
-  } catch {
-    // toast 已提示
-  }
+/** 「新建」按钮（T13 懒创建语义）：只进草稿态，不落库、没有可失败的请求 */
+const toCreate = () => {
+  store.startDraft();
   if (props.mobile) {
     emit("close");
   }
@@ -77,9 +114,34 @@ const toDelete = (item: ChatSessionItem) => {
     confirm: async () => {
       try {
         await store.deleteSession(item.id);
+        // 多选态下顺手把同一 id 从勾选集拿掉，避免清理计数虚大
+        checked.value = checked.value.filter((c) => c !== item.id);
         Alert.success("删除成功");
       } catch {
         // toast 已提示
+      }
+    },
+  });
+};
+
+/** 批量清理（T12）：文案带 n 与一并清理警示 → 走批量端点 → 退多选态 */
+const toBatchClean = () => {
+  const ids = [...checked.value];
+  if (ids.length === 0) {
+    return;
+  }
+  Confirm.open({
+    title: "批量清理确认",
+    content: `确定清理所选的 ${ids.length} 个会话吗？各会话内的消息与小票一并清理。`,
+    confirmText: "清理",
+    cancelText: "取消",
+    confirm: async () => {
+      try {
+        const n = await store.batchDeleteSessions(ids);
+        Alert.success(`已清理 ${n} 个会话`);
+        exitSelect();
+      } catch {
+        // toast 已提示；留在多选态便于重试
       }
     },
   });
@@ -99,7 +161,22 @@ const toDelete = (item: ChatSessionItem) => {
         <span class="font-semibold text-ink-primary dark:text-ink-onDark">AI 记账</span>
       </div>
       <div class="flex items-center gap-1 flex-shrink-0">
+        <!-- 多选 toggle（T12）：多选态高亮，再点退出（底部「取消」同效） -->
         <button
+          aria-label="多选"
+          :title="selecting ? '退出多选' : '多选'"
+          @click="toggleSelect"
+          :class="[
+            'p-2 rounded-lg border transition-colors',
+            selecting
+              ? 'bg-brand-600 border-brand-600 text-white dark:text-ink-primary hover:bg-brand-700'
+              : 'text-ink-secondary dark:text-ink-onDark hover:bg-surface-soft dark:hover:bg-surface-dark border-frame dark:border-frame-dark',
+          ]"
+        >
+          <CheckCircleIcon class="h-5 w-5" />
+        </button>
+        <button
+          v-if="!selecting"
           aria-label="新建会话"
           title="新建会话"
           @click="toCreate"
@@ -134,7 +211,7 @@ const toDelete = (item: ChatSessionItem) => {
         v-else-if="store.sessions.length === 0"
         class="px-3 py-8 text-center text-xs text-ink-muted dark:text-ink-onDark/60"
       >
-        还没有会话<br />点上方「新建会话」开始记账
+        还没有会话，直接说一句话或点「新建会话」开始记账
       </div>
 
       <!-- 会话项 -->
@@ -144,15 +221,31 @@ const toDelete = (item: ChatSessionItem) => {
           :key="item.id"
           role="button"
           tabindex="0"
+          :aria-checked="selecting ? checked.includes(item.id) : undefined"
           @click="select(item)"
           @keydown.enter="select(item)"
           :class="[
             'group flex items-center justify-between gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors duration-200 outline-none border',
-            item.id === store.currentId
-              ? 'bg-surface-soft dark:bg-surface-dark text-brand-700 dark:text-brand-300 border-frame dark:border-frame-dark'
-              : 'text-ink-secondary dark:text-ink-onDark border-transparent hover:bg-surface-soft dark:hover:bg-surface-darkMuted',
+            selecting && checked.includes(item.id)
+              ? 'bg-brand-100 dark:bg-brand-900 text-brand-700 dark:text-brand-300 border-brand-300 dark:border-brand-700'
+              : item.id === store.currentId
+                ? 'bg-surface-soft dark:bg-surface-dark text-brand-700 dark:text-brand-300 border-frame dark:border-frame-dark'
+                : 'text-ink-secondary dark:text-ink-onDark border-transparent hover:bg-surface-soft dark:hover:bg-surface-darkMuted',
           ]"
         >
+          <!-- 多选态行首勾选框：自绘 span（不引组件库）；点行反选见 select -->
+          <span
+            v-if="selecting"
+            aria-hidden="true"
+            class="flex-shrink-0 flex h-4 w-4 items-center justify-center rounded border transition-colors"
+            :class="
+              checked.includes(item.id)
+                ? 'bg-brand-600 border-brand-600'
+                : 'bg-surface dark:bg-surface-darkMuted border-ink-muted dark:border-ink-onDark/50'
+            "
+          >
+            <CheckIcon v-if="checked.includes(item.id)" class="h-3 w-3 text-white" />
+          </span>
           <span class="truncate text-sm font-medium min-w-0 flex-1">
             {{ titleOf(item) }}
           </span>
@@ -168,6 +261,28 @@ const toDelete = (item: ChatSessionItem) => {
           </button>
         </li>
       </ul>
+    </div>
+
+    <!-- 多选操作栏（T12）：批量清理 / 取消 -->
+    <div
+      v-if="selecting"
+      class="flex items-center gap-2 px-3 py-2.5 border-t border-frame-light dark:border-frame-dark flex-shrink-0"
+    >
+      <button
+        aria-label="清理所选会话"
+        :disabled="checkedCount === 0"
+        class="flex-1 px-3 py-1.5 bg-state-danger text-white rounded-md text-xs font-medium transition-colors hover:bg-state-danger/90 disabled:cursor-not-allowed disabled:opacity-40"
+        @click="toBatchClean"
+      >
+        清理所选 ({{ checkedCount }})
+      </button>
+      <button
+        aria-label="退出多选"
+        class="px-3 py-1.5 rounded-md text-xs font-medium text-ink-secondary dark:text-ink-onDark border border-frame dark:border-frame-dark hover:bg-surface-soft dark:hover:bg-surface-dark transition-colors"
+        @click="exitSelect"
+      >
+        取消
+      </button>
     </div>
   </div>
 </template>

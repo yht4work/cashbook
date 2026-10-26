@@ -173,7 +173,7 @@ const checkVersion = () => {
 
     <div
       class="flex relative"
-      style="height: calc(100vh - 64px)"
+      style="height: calc(100vh - 64px); height: calc(100dvh - 64px);"
       :class="{ 'pb-12': isMobile }"
     >
       <!-- Sidebar - Desktop -->
