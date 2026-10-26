@@ -64,7 +64,7 @@ const EMPTY_REPLY_TEXT = "未识别到记账内容，可以直接说金额，例
 /**
  * 失败文案（终审 M2）：气泡里只给短中文，原始系统错误（fs/网络栈）不外露，
  * 原文只进 console 日志。透传两类：OllamaError 的中文文案；本功能自己抛的
- * 中文 Error（如「AI 回复解析失败」）。其余按 code 分类映射兜底。
+ * 中文 Error（如「解析失败：未能从回复中识别出流水内容」）。其余按 code 分类映射兜底。
  */
 const failRowOf = (err: unknown): string => {
   if (err instanceof OllamaError) {
@@ -133,7 +133,9 @@ const runTurn = async (event: H3Event, a: TurnArgs): Promise<void> => {
     // 5. 解析 + 归一 → flows 帧（无 flowId/imageIdx；invoices=最终文件名）
     const raw = extractFlowArray(reply);
     if (!raw) {
-      throw new Error("AI 回复解析失败");
+      // 文案以中文开头（终审微修）：failRowOf 的英文启发式会把以 "AI" 开头
+      // 的自家消息误判成原始系统错误兜底掉
+      throw new Error("解析失败：未能从回复中识别出流水内容");
     }
     const current = a.mode === "retry" ? (ctx.turns.at(-1)?.images ?? []) : a.userImages;
     const flows: DraftFlow[] = normalizeFlows(raw, ctx.cand, ctx.today, {
@@ -169,6 +171,7 @@ const runTurn = async (event: H3Event, a: TurnArgs): Promise<void> => {
 
     await stream.close();
   } catch (err: any) {
+    console.error(err); // 终审微修：原始错误（气泡已兜底成短中文）必须留在服务端日志
     const m = failRowOf(err);
     // 失败落库：send=追一条 status=-1 失败行；retry=替换失败行自身（status 保持 -1）
     try {
