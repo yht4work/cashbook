@@ -25,8 +25,9 @@ export class OllamaError extends Error {
 /** 连上之后等响应头的兜底时限；读完头就撤（流式读不设总时限，长正文不该被掐） */
 const CONNECT_TIMEOUT_MS = 30_000;
 
-// 模型偶尔无视 think:false，把推理直接吐在正文里，这里自己剥。
-// 标签用拼接写出（7 / 8 字符），字面量含尖括号与斜杠，拼接比直接写清楚
+// 模型偶尔把推理直接吐在正文里（inline 标签或裸叙述），这里对标签自己剥
+// （独立 thinking 字段则按上文整体不读）。标签用拼接写出（7 / 8 字符），
+// 字面量含尖括号与斜杠，拼接比直接写清楚
 const THINK_OPEN = "<" + "think" + ">"; // 共 7 字符
 const THINK_CLOSE = "<" + "/think" + ">"; // 共 8 字符
 
@@ -89,7 +90,11 @@ const makeThinkFilter = () => {
 };
 
 /**
- * 共用的 POST /api/chat：think:false + messages 原样透传。
+ * 共用的 POST /api/chat：think:true + messages 原样透传。
+ * think 放开（Task 10 修订裁决）：Think 通道（message.thinking 独立字段）本来
+ * 就被服务端整体丢弃（见 header 注释），推理一行都不外发；而 think:false 会把
+ * 模型的英文叙述赶进 content（正文 "The user says…"、标题 "Theuserwants"）。
+ * 推理在独立通道时正文/标题都干净——质量优先，如需提速可回退 think:false。
  * 连不上（含 baseUrl 写坏解析失败）与连接兜底超时分两条中文 message；
  * 非 200 一律按错误状态抛。
  */
@@ -101,7 +106,7 @@ const ollamaRequest = async (cfg: OllamaCfg, messages: unknown[], stream: boolea
     res = await fetch(new URL("/api/chat", cfg.baseUrl), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: cfg.model, messages, stream, think: false }),
+      body: JSON.stringify({ model: cfg.model, messages, stream, think: true }),
       signal: killer.signal,
     });
   } catch {

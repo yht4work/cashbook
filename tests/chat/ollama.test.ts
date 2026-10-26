@@ -2,7 +2,8 @@
  * ollama 客户端契约测试：本地 node http 起一个迷你 ollama 吐 NDJSON。
  *
  * 钉死的契约：
- * - 请求体 = {model, messages, stream, think: false}，messages 原样透传
+ * - 请求体 = {model, messages, stream, think: true}，messages 原样透传
+ *   （think 放开：推理走独立 thinking 字段被丢弃，正文不再被英文叙述污染）
  * - content 累积 → 最终正文，且与逐条 onDelta 拼接完全一致（delta 顺序）
  * - message.thinking 一律丢弃：不进 delta、不进正文（含 inline think 块、
  *   标签被行切断、流结束时未闭合的前缀尾部）
@@ -98,12 +99,12 @@ describe("chatStream 正常面", () => {
       );
       expect(result).toEqual({ content: "好的，记了。尾巴没带换行也要收到" });
       expect(deltas.join("")).toBe(result.content);
-      // 请求契约：think:false + stream:true + messages 原样透传
+      // 请求契约：think:true + stream:true + messages 原样透传
       expect(m.bodies[0]).toEqual({
         model: MODEL,
         messages: MESSAGES,
         stream: true,
-        think: false,
+        think: true,
       });
     } finally {
       await m.done();
@@ -340,7 +341,7 @@ describe("chatOnce", () => {
         model: MODEL,
         messages: [{ role: "user", content: "为这笔记录起个标题" }],
         stream: false,
-        think: false,
+        think: true,
       });
     } finally {
       await m.done();

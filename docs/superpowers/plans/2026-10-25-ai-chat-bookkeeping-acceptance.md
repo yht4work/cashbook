@@ -28,8 +28,8 @@
 
 ## 尾注：已知 V1 限制（不阻塞验收，均有记录）
 
-- 设计文档 L251-271 已记录：done 帧 messageId 并发竞态（前端锁输入防）；历史窗口内小票文件缺失→该会话后续 send/retry 以明确文案失败直至滚出 20 条窗口；`chatOnce` 无读超时（仅连接兜底 30s）；首条消息 done 帧延迟 ~2s（先起名再发 done）；起名/正文偶发模型「指令复述」回声与孤立 `</think>` 闭合标签进 content（`t10-retry-done.png` 仍有实证）。
-- **Task 10 补充定位**：正文/标题回声与 `server/utils/chat/ollama.ts` 的 `think:false` 强相关——think 通道被关后 glm-5.3-flash:cloud 把英文叙述直接写进 `message.content`（新旧 prompt 均 4/4 复现）；think 开启时同 prompt 的 content 干净（正文=纯 JSON、标题=「记录午饭35元」）。指令层加固已加（`server/utils/chat/prompt.ts` 反回声行），该组合下不奏效；是否放开 think 交评审裁决（见 task-10-report.md）。
+- 设计文档 L251-271 已记录：done 帧 messageId 并发竞态（前端锁输入防）；历史窗口内小票文件缺失→该会话后续 send/retry 以明确文案失败直至滚出 20 条窗口；`chatOnce` 无读超时（仅连接兜底 30s）；首条消息 done 帧延迟 ~2s（先起名再发 done）。
+- **指令回声/标题垃圾：已解于 think 放开**（Task 10 修订裁决，`server/utils/chat/ollama.ts` `think:false`→`think:true`）：回声与孤立 `</think>` 曾多次实证（`t10-retry-done.png` 等），根因是 think 通道被关后 glm-5.3-flash:cloud 把英文叙述直接写进 `message.content`；放开后实测两连发 content 均为纯 JSON（无叙述/无孤立标签）、标题干净（「昨日午饭支出35元」，`t10b-*.png` / `t10b-verify.log` 15/15 PASS）。prompt 的反回声指令行保留作纵深防御；**如需提速可回退 `think:false`，回声随之回归**。
 - 小票 blob 缓存页生不 revoke：`chatStore.imageBlobCache` 按文件名缓存 blob URL，页面生命周期持有（不逐卡 revoke，换页回收靠浏览器）。
 - `/flows?highlight=<flowId>` 链接暂无消费者：`flows.client.vue` 未读该参数（已入卡跳转链接存在、落地页不滚动定位，V1 收）。
 - 并发同名小票双下载孤儿 URL：`chatImageBlob` 首次并发未命中缓存时各自下载，后写者胜出、先者的 URL 泄漏（不 revoke，仅浏览器侧）。
