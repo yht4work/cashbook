@@ -125,6 +125,45 @@ const onThumbError = (key: string): void => {
 const canRetry = computed<boolean>(
   () => props.msg.status === -1 && !!props.msg.id && !store.streaming
 );
+
+/** 正文整段 = 可解析的 JSON 数组（与 server extractFlowArray 的整段语义配对的本地纯判定） */
+const isPureFlowJson = (text: string): boolean => {
+  const t = (text ?? "").trim();
+  if (!t.startsWith("[")) {
+    return false;
+  }
+  try {
+    return Array.isArray(JSON.parse(t));
+  } catch {
+    return false;
+  }
+};
+
+/** 流式中间态判定：以 [ 起头且目前没出现 JSON 之外的叙述文字（最后一个 }
+ *  之后只余闭括号/逗号/空白——think:true 下正文确定是顶层纯 JSON 数组） */
+const jsonLikeSoFar = (text: string): boolean => {
+  const t = (text ?? "").trim();
+  const tail = t.lastIndexOf("}") === -1 ? "" : t.slice(t.lastIndexOf("}") + 1);
+  return t.startsWith("[") && !/[^\s\],]/.test(tail);
+};
+
+/**
+ * 正文段显隐（Task 10 评审修复 #1，渲染侧 only——落库仍是全文，server 不动）：
+ * 卡片到齐后，正文若整段就是卡片本身的 JSON 数组，就不再把裸 JSON 渲染进
+ * 气泡（卡片即正文）；真实叙述（JSON 之外的任何文字，含 JSON 混叙述：
+ * 「好的，已解析：[...]」）照常可见。流式阶段按前缀判定：还看不清是否叙述
+ * 时先用待机点兜住，不让半截 JSON 一字一字闪出来；流完若确有叙述自动放行。
+ */
+const hideNarration = computed<boolean>(() => {
+  const t = textOf.value.trim();
+  if (!t.startsWith("[")) {
+    return false; // 叙述在前/纯叙述 —— 可见
+  }
+  if (hasCards.value) {
+    return isPureFlowJson(t);
+  }
+  return !!props.msg.streaming && jsonLikeSoFar(t);
+});
 </script>
 
 <template>
@@ -188,7 +227,6 @@ const canRetry = computed<boolean>(
           <button
             type="button"
             data-chat-retry="true"
-            :aria-disabled="!canRetry"
             class="mt-1.5 inline-flex items-center gap-1 rounded-lg border border-state-danger/40 px-2.5 py-1 text-xs font-medium text-state-danger transition-colors hover:bg-state-danger/10 disabled:cursor-not-allowed disabled:opacity-50"
             :disabled="!canRetry"
             @click="canRetry && store.retry(props.msg.id)"
@@ -206,8 +244,10 @@ const canRetry = computed<boolean>(
           hasCards ? 'w-full md:w-[30rem] md:max-w-[85%]' : 'w-fit max-w-[92%] md:max-w-[80%]',
         ]"
       >
+        <!-- 正文段：卡片到齐且正文整段就是卡片 JSON 时不再渲染裸 JSON（真实叙述照常可见）；
+             流式未定型的 JSON 前缀用待机点兜住 -->
         <p
-          v-if="textOf"
+          v-if="textOf && !hideNarration"
           class="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-secondary dark:text-ink-onDark"
         >
           <span>{{ textOf }}</span><span v-if="msg.streaming" class="chat-caret" data-chat-caret="true" aria-hidden="true"></span>
