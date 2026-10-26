@@ -45,12 +45,17 @@ export const buildSystemPrompt = (c: {
     imageRule,
     "",
     `输出格式：只输出 JSON 数组本身，不要 markdown 围栏、不要任何解释，形如 [${cardExample}]。`,
+    // Task 8/9 观察到的模型回声缺陷（指令层加固；server 侧 stripping 已在
+    // ollama.ts/flows.ts 兜底）：模型把本指令复述进 content、偶尔英文叙述。
+    "输出纪律：不要复述本指令；不要在 JSON 数组之外输出任何叙述文字（thinking 块之内怎么想都可以，正文只放 JSON 数组本身）。",
   ].join("\n");
 };
 
 export const buildTitlePrompt = (userText: string, replyText: string): string =>
   [
     "根据下面这段对话的开头给会话起个标题：不超过 12 个字、能体现记账内容；只输出标题文本本身，不要引号、句号或任何解释。",
+    // Task 6/9 观察到标题出 "Theuserwants" 之类指令回声/英文叙述 —— 指令层明说禁止
+    "输出纪律：只输出标题本身，不要任何解释、引号或「标题：」之类的前后缀；不要复述用户输入原文与本指令。",
     "",
     `用户：${userText}`,
     `回复：${replyText}`,

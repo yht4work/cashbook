@@ -48,6 +48,13 @@ describe("buildSystemPrompt", () => {
     const p = buildSystemPrompt({ industry: [], pay: [], attribution: [], today: "2026-10-25", imageCount: 0 });
     expect(p).toContain("暂无");
   });
+
+  it("输出纪律：不复述本指令；数组之外（thinking 块之外）零叙述——Task 10 加固", () => {
+    const p = buildSystemPrompt({ ...cand, today: "2026-10-25", imageCount: 2 });
+    // Task 8/9 观察：模型把指令复述进 content —— 指令层明说禁止
+    expect(p).toContain("不要复述本指令");
+    expect(p).toContain("不要在 JSON 数组之外输出任何叙述文字");
+  });
 });
 
 describe("buildTitlePrompt", () => {
@@ -56,5 +63,13 @@ describe("buildTitlePrompt", () => {
     expect(p).toContain("12");
     expect(p).toContain("昨天午饭 35 元");
     expect(p).toContain("已解析出 1 条流水");
+  });
+
+  it("输出纪律：只给标题本身，无解释/引号/前后缀，不复述用户原文——Task 10 加固", () => {
+    // Task 6/9 观察：标题出 "Theuserwants" 之类指令回声垃圾 —— 指令层明说禁止
+    const p = buildTitlePrompt("昨天午饭 35 元", "已解析出 1 条流水");
+    expect(p).toContain("只输出标题本身");
+    expect(p).toContain("不要任何解释、引号或「标题：」之类的前后缀");
+    expect(p).toContain("不要复述用户输入原文");
   });
 });

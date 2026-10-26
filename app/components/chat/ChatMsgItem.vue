@@ -13,7 +13,7 @@ import ChatDraftCard from "~/components/chat/ChatDraftCard.vue";
  * - assistant：左对齐，叙述文本简单换行渲染（whitespace-pre-wrap，不解析 markdown）；
  *   首部 trim 一次（旧数据可能残留前导空行）。
  * - 流式行（msg.streaming）显示打字光标；内容未到时显示三点待机。
- * - status=-1：失败态（警示样式 + 服务端错误文案）；重试按钮留给 Task 10（store.retry）。
+ * - status=-1：失败态（警示样式 + 服务端错误文案 + 重试按钮，streaming 时禁用）。
  * - flows 非空：卡片挂点逐项渲染 ChatDraftCard（编辑/小票勾选/入账）。
  */
 interface Props {
@@ -115,6 +115,16 @@ const onThumbError = (key: string): void => {
     broken.value.push(key);
   }
 };
+
+/**
+ * 重试失败轮（Task 10）：仅 status=-1 的服务端行可重试（本地临时 id=0 行
+ * 还没有服务端 id，服务端会答「消息不存在」）。store.streaming 全局锁：
+ * 生成中一律禁用，避免并发重试抢流（store.retry 内部同款守卫）。
+ * 成功后该失败行被流式内容原地替换（status→0，按钮随失败态消失）。
+ */
+const canRetry = computed<boolean>(
+  () => props.msg.status === -1 && !!props.msg.id && !store.streaming
+);
 </script>
 
 <template>
@@ -160,7 +170,7 @@ const onThumbError = (key: string): void => {
 
     <!-- assistant 气泡 -->
     <div v-else class="w-fit max-w-[92%] md:max-w-[80%] min-w-0">
-      <!-- 失败态（status=-1）：警示样式 + 错误文案；重试按钮留给 Task 10 -->
+      <!-- 失败态（status=-1）：警示样式 + 错误文案 + 重试按钮 -->
       <div
         v-if="msg.status === -1"
         data-chat-failed="true"
@@ -175,7 +185,16 @@ const onThumbError = (key: string): void => {
           >
             {{ textOf }}
           </p>
-          <!-- Task 10 挂点：重试按钮 → store.retry(msg.id)（仅 status=-1 可重试） -->
+          <button
+            type="button"
+            data-chat-retry="true"
+            :aria-disabled="!canRetry"
+            class="mt-1.5 inline-flex items-center gap-1 rounded-lg border border-state-danger/40 px-2.5 py-1 text-xs font-medium text-state-danger transition-colors hover:bg-state-danger/10 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="!canRetry"
+            @click="canRetry && store.retry(props.msg.id)"
+          >
+            重试
+          </button>
         </div>
       </div>
 
