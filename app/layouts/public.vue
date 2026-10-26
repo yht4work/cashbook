@@ -158,7 +158,14 @@ const checkVersion = () => {
     />
   </Head>
 
-  <div class="h-screen p-0 m-0 overflow-hidden">
+  <!-- 根高度用 dvh（双声明兜底）：h-screen 的 100vh 在 iOS Safari 是「工具栏全收起
+       的大视口」高度，比底部 URL 栏展开时的可视区高约 100px，文档比屏幕高 → 整页
+       可滚，上滑会把 Header/聊天顶栏顶出屏（fixed 底栏却不动）。dvh 始终等于当前
+       可视高度，文档=视口后整页无滚动量，滚动只发生在消息流内部。 -->
+  <div
+    class="p-0 m-0 overflow-hidden"
+    style="height: 100vh; height: 100dvh;"
+  >
     <!-- Header -->
     <LayoutAppHeader
       :book-name="bookName"
