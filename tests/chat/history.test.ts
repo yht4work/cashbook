@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { buildImageNumbering, buildOllamaMessages, type ChatTurn } from "../../server/utils/chat/history";
+import { buildImageNumbering, buildOllamaMessages, planImages, type ChatTurn } from "../../server/utils/chat/history";
 
 const SYS = "SYS PROMPT";
 const opts = { imageTurnLimit: 3, imageTotalLimit: 6 };
@@ -135,5 +135,32 @@ describe("buildImageNumbering", () => {
     const narrow = buildImageNumbering(turns, { imageTurnLimit: 1, imageTotalLimit: 1 });
     expect(wide).toEqual(["a1.png", "a2.png", "b1.png"]);
     expect(narrow).toEqual(wide); // 占号只按出现顺序，不随窗口变化
+  });
+});
+
+describe("planImages（终审 M1：sendCore 读盘只读真传集，缺票半径=真传的图）", () => {
+  it("numbered=全量编号表；attached=真传的 1-based 编号；读盘名单=attached 反查编号表", () => {
+    const turns: ChatTurn[] = [
+      ut("a", ["a1.png", "a2.png"]), // 最旧一轮，额度装不下 → 整体占位
+      at("回复"),
+      ut("b", ["b1.png"]),
+      ut("c", ["c1.png", "c2.png", "c3.png"]), // 最新
+    ];
+    const plan = planImages(turns, { imageTurnLimit: 2, imageTotalLimit: 4 });
+
+    expect(plan.numbered).toEqual(["a1.png", "a2.png", "b1.png", "c1.png", "c2.png", "c3.png"]);
+    expect([...plan.attached].sort((x, y) => x - y)).toEqual([3, 4, 5, 6]); // b 轮 1 张 + c 轮 3 张
+    // sendCore 的读盘口径与 buildOllamaMessages 的真传口径共享这张 plan
+    expect([...plan.attached].map((i) => plan.numbered[i - 1]).filter(Boolean)).toEqual(
+      ["b1.png", "c1.png", "c2.png", "c3.png"]
+    );
+    expect(buildImageNumbering(turns, { imageTurnLimit: 2, imageTotalLimit: 4 })).toEqual(plan.numbered);
+  });
+
+  it("无图/空会话：attached 为空 → 读盘名单为空数组（loadImages 不碰任何文件）", () => {
+    expect(planImages([], opts)).toEqual({ numbered: [], attached: new Set() });
+    const plan = planImages([ut("纯文字"), at("回复")], opts);
+    expect(plan.numbered).toEqual([]);
+    expect([...plan.attached]).toEqual([]);
   });
 });

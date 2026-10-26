@@ -20,7 +20,10 @@ import {
   deleteSession,
   ensureTitle,
   getContext,
+  getMessage,
   getMessages,
+  finalizeFailedRetry,
+  lastMessageId,
   listSessions,
   loadImages,
   saveCard,
@@ -236,6 +239,83 @@ describe("消息追加与读取", () => {
     expect(rows.map((r) => r.content)).toEqual(["纯文字", "回复"]);
     expect(rows[0].images).toBe(""); // images="" 是存储原样
     expect(await getMessages(UID, others.id)).toEqual([]); // 拿不到别人的消息
+  });
+});
+
+describe("getMessage / lastMessageId / finalizeFailedRetry（终审 M4/M5：findFirst + 单条收尾）", () => {
+  it("getMessage：本人本会话取到行；跨会话/别人的/不存在 → null", async () => {
+    const a = await createSession(UID);
+    const b = await createSession(UID);
+    await appendUserMessage(UID, a.id, "在会话a", ["u1.png"]);
+    const row = (await getMessages(UID, a.id))[0];
+    expect(await getMessage(UID, a.id, row.id)).toEqual(row); // 行原样返回
+    expect(await getMessage(UID, b.id, row.id)).toBeNull(); // 行不属于会话 b
+
+    const foreign = await createSession(UID_OTHER);
+    try {
+      await appendUserMessage(UID_OTHER, foreign.id, "别人的");
+      const frow = (await getMessages(UID_OTHER, foreign.id))[0];
+      expect(await getMessage(UID, foreign.id, frow.id)).toBeNull();
+      expect(await getMessage(UID, a.id, 999999005)).toBeNull(); // 不存在
+    } finally {
+      await prisma.chatMessage.deleteMany({ where: { sessionId: foreign.id } });
+      await prisma.chatSession.deleteMany({ where: { id: foreign.id } });
+    }
+  });
+
+  it("lastMessageId：会话内最新一条的 id；空会话/别人的会话 → 0", async () => {
+    const { id } = await createSession(UID);
+    expect(await lastMessageId(UID, id)).toBe(0); // 空会话
+    await appendUserMessage(UID, id, "第一");
+    await appendAssistantMessage(UID, id, "回复", null, 0);
+    const rows = await getMessages(UID, id);
+    expect(await lastMessageId(UID, id)).toBe(rows.at(-1)!.id);
+    expect(await lastMessageId(UID, id)).not.toBe(rows[0].id);
+
+    const foreign = await createSession(UID_OTHER);
+    try {
+      await appendUserMessage(UID_OTHER, foreign.id, "别人的");
+      expect(await lastMessageId(UID, foreign.id)).toBe(0); // 别人数据拿不到
+    } finally {
+      await prisma.chatMessage.deleteMany({ where: { sessionId: foreign.id } });
+      await prisma.chatSession.deleteMany({ where: { id: foreign.id } });
+    }
+  });
+
+  it("finalizeFailedRetry：-1 行一次落齐 content/flows/status=0；重复收尾/别人的 → false 且内容不动", async () => {
+    const { id } = await createSession(UID);
+    await appendUserMessage(UID, id, "小票给你", ["u1.png"]);
+    const fail = await prisma.chatMessage.create({
+      data: { sessionId: id, userId: UID, role: "assistant", content: "生成失败", status: -1 },
+    });
+    const flows = JSON.stringify([{ name: "奶茶", money: 15 }]);
+
+    expect(await finalizeFailedRetry(UID, fail.id, "已记好 1 条", flows)).toBe(true);
+    const row = await prisma.chatMessage.findUnique({ where: { id: fail.id } });
+    expect(row!.content).toBe("已记好 1 条");
+    expect(row!.flows).toBe(flows);
+    expect(row!.status).toBe(0);
+
+    // 已收尾（status 非 -1）→ false，内容不再被第二次写动（单条语义）
+    expect(await finalizeFailedRetry(UID, fail.id, "不该覆盖", "[]")).toBe(false);
+    const again = await prisma.chatMessage.findUnique({ where: { id: fail.id } });
+    expect(again!.content).toBe("已记好 1 条");
+    expect(again!.status).toBe(0);
+
+    // 别人的失败行 → false 且原样
+    const foreign = await createSession(UID_OTHER);
+    try {
+      const ofail = await prisma.chatMessage.create({
+        data: { sessionId: foreign.id, userId: UID_OTHER, role: "assistant", content: "失败", status: -1 },
+      });
+      expect(await finalizeFailedRetry(UID, ofail.id, "x", "[]")).toBe(false);
+      const orow = await prisma.chatMessage.findUnique({ where: { id: ofail.id } });
+      expect(orow!.content).toBe("失败");
+      expect(orow!.status).toBe(-1);
+    } finally {
+      await prisma.chatMessage.deleteMany({ where: { sessionId: foreign.id } });
+      await prisma.chatSession.deleteMany({ where: { id: foreign.id } });
+    }
   });
 });
 

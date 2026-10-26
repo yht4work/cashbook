@@ -19,7 +19,7 @@
  * - send(text, files) 的 files 为 File[]（input FileList 借 Array.from）。
  */
 import { defineStore } from "pinia";
-import { useCookie } from "#imports";
+import { navigateTo, useCookie, useRoute } from "#imports";
 import { doApi } from "./api";
 import { Alert } from "./alert";
 
@@ -133,6 +133,20 @@ const authHeader = (): Record<string, string> => ({
   Authorization: useCookie("Authorization").value || "",
 });
 
+/**
+ * c==400 → 登录跳转（终审 Parked#3）：复刻 doApi.intercepterResponse 的
+ * 导航语义——手动 fetch 的路径（unwrapResult/removeApi + SSE 的校验类
+ * 失败分支）此前只弹 toast，JWT 过期后停留在本页反复撞 400；
+ * 现在与 doApi 路径统一导向 /auth/login 并带 callbackUrl。
+ */
+const toLoginWhenUnauthorized = (c: number): void => {
+  if (c !== 400) {
+    return;
+  }
+  const route = useRoute();
+  void navigateTo({ path: "/auth/login", query: { callbackUrl: route.fullPath } });
+};
+
 /** `Result` 校验 + 文案兜底（供不走 doApi 的 fetch 封装统一解析） */
 const unwrapResult = async (res: Response): Promise<{ c: number; m: string; d: any } | null> => {
   const data = (await res.json().catch(() => null)) as
@@ -144,7 +158,9 @@ const unwrapResult = async (res: Response): Promise<{ c: number; m: string; d: a
     }
     return null;
   }
-  return { c: Number(data.c ?? 0), m: data.m || "", d: data.d };
+  const c = Number(data.c ?? 0);
+  toLoginWhenUnauthorized(c); // 与 doApi 同口径：c==400 一律导向登录
+  return { c, m: data.m || "", d: data.d };
 };
 
 /** DELETE 请求：doApi 没有 delete 封装，这里按其同款约定补一个（query 长在 URL 上） */
@@ -401,20 +417,22 @@ export const useChatStore = defineStore("chat", {
      * 本地先挂 user 行与流式 assistant 行：delta 增量拼进流式行、flows
      * 帧挂上卡片、done 固化该行（真实 messageId/id）并回读服务端事实；
      * fail 落一条 status=-1 行。全程 streaming 状态锁输入。
+     * 返回 boolean（终审 M8）：true=通过预检、请求已发出（调用方可清输入），
+     * false=被前置校验拦下（锁输入/无会话/无账本/空消息，未发请求）。
      */
-    async send(text: string, files?: File[] | null): Promise<void> {
+    async send(text: string, files?: File[] | null): Promise<boolean> {
       if (this.streaming) {
-        return; // 锁输入：并发发送会造成 done 帧的 id 竞态（V1 已知限制）
+        return false; // 锁输入：并发发送会造成 done 帧的 id 竞态（V1 已知限制）
       }
       const sessionId = Number(this.currentId) || 0;
       if (!sessionId) {
         Alert.error("请先新建会话");
-        return;
+        return false;
       }
       const bookId = bookIdOf();
       if (!bookId) {
         Alert.error("请先选择账本");
-        return;
+        return false;
       }
       const textStr = String(text ?? "").trim();
       const imgs = (Array.isArray(files) ? files : []).filter(
@@ -422,7 +440,7 @@ export const useChatStore = defineStore("chat", {
       );
       if (!textStr && imgs.length === 0) {
         Alert.error("消息不能为空");
-        return;
+        return false;
       }
 
       const fd = new FormData();
@@ -524,6 +542,7 @@ export const useChatStore = defineStore("chat", {
           }
         }
       }
+      return true;
     },
 
     /**

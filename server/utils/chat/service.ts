@@ -126,6 +126,27 @@ export const getMessages = (userId: number, sessionId: number): Promise<ChatMess
     select: { id: true, role: true, content: true, images: true, flows: true, status: true, createDate: true },
   });
 
+/** 取单条消息（终审 M4）：findFirst 直取，不整表 load；跨会话/非本人 → null */
+export const getMessage = async (
+  userId: number,
+  sessionId: number,
+  messageId: number
+): Promise<ChatMessageRow | null> =>
+  (await prisma.chatMessage.findFirst({
+    where: { id: messageId, sessionId, userId },
+    select: { id: true, role: true, content: true, images: true, flows: true, status: true, createDate: true },
+  })) ?? null;
+
+/** 会话里最新一条消息的 id（终审 M4）：findFirst orderBy id desc，不整表 load */
+export const lastMessageId = async (userId: number, sessionId: number): Promise<number> => {
+  const row = await prisma.chatMessage.findFirst({
+    where: { sessionId, userId },
+    orderBy: { id: "desc" },
+    select: { id: true },
+  });
+  return row?.id ?? 0;
+};
+
 export const appendUserMessage = async (
   userId: number,
   sessionId: number,
@@ -261,6 +282,25 @@ export const updateFailedMessage = async (userId: number, messageId: number, con
     orderBy: { id: "desc" },
   });
   return prior?.images ?? "";
+};
+
+/**
+ * retry 生成成功后的收尾（终审 M5）：content + flows + status 单条带归属
+ * updateMany 一次落齐，sendCore 不再直连 prisma。归属条件带 status=-1：
+ * 行已被并发重试更新（status 已非 -1）时 count=0 → false，调用方记
+ * warn 日志；谁先到谁生效。
+ */
+export const finalizeFailedRetry = async (
+  userId: number,
+  messageId: number,
+  content: string,
+  flows: string
+): Promise<boolean> => {
+  const upd = await prisma.chatMessage.updateMany({
+    where: { id: messageId, userId, status: -1 },
+    data: { content, flows, status: 0 }, // 新 flows 无 flowId → 未入账 → 0
+  });
+  return upd.count > 0;
 };
 
 // ==================== 卡片入账 ====================

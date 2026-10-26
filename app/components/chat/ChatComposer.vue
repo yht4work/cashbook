@@ -41,23 +41,22 @@ const placeholder = computed<string>(() => {
   return "拍张小票，或说：昨天午饭 35";
 });
 
-/** 发送：store.send 同步段先建好流式行（气泡立即回显），随后清空输入 */
-const toSend = (): void => {
+/**
+ * 发送（终审 M8）：await store.send——通过预检（请求已发出）才清空输入，
+ * 被拦下（无账本/无会话/空消息/锁输入）时输入原样保留，不打一次字就蒸发。
+ * 生成期间输入处于禁用态，文案等本轮结束后再清，失败草稿不丢。
+ */
+const toSend = async (): Promise<void> => {
   if (!canSend.value) {
     return;
   }
   const files = pendings.value.map((p) => p.file);
   const t = text.value;
-  const bookId =
-    typeof localStorage !== "undefined" ? localStorage.getItem("bookId") : null;
-  if (!bookId) {
-    // 缺 bookId 时 store.send 会弹「请先选择账本」，保留输入不清空
-    void store.send(t, files);
-    return;
+  const accepted = await store.send(t, files);
+  if (accepted) {
+    text.value = "";
+    clearPendings();
   }
-  text.value = "";
-  clearPendings();
-  void store.send(t, files);
 };
 
 const clearPendings = (): void => {

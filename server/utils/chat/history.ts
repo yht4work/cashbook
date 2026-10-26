@@ -44,11 +44,12 @@ const settledCountOf = (flows?: string): number | null => {
   }
 };
 
-/** 一次调用的图片计划：numbered=全局编号表，attached=其中要真传的 1-based 编号 */
-type ImagePlan = { numbered: string[]; attached: Set<number> };
+/** 一次调用的图片计划：numbered=全局编号表，attached=其中要真传的 1-based 编号
+ *  （导出给 sendCore：读盘只读真传集，缺票半径=真传的图，见终审修复波次 M1） */
+export type ImagePlan = { numbered: string[]; attached: Set<number> };
 
 /** 同一趟顺序里既占号又定真传集——两件事共享一个下标序，不可能各数各的 */
-const planImages = (turns: ChatTurn[], o: ImageWindowOpts): ImagePlan => {
+export const planImages = (turns: ChatTurn[], o: ImageWindowOpts): ImagePlan => {
   // 真传额度：从最新含图 user 轮往旧，受限「轮数上限」与「张数上限」
   const allow = new Map<number, number>(); // 轮下标 → 该轮允许真传的张数
   const imgTurnIdxs: number[] = [];

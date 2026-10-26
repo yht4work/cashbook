@@ -13,20 +13,19 @@
  *   这是特意防住的接线契约）；生成 / 解析 / 落库照常走完，帧丢弃即可。
  * - 落库时序（别双写）：send = 存图 → user 行 → 生成 → append assistant 行；
  *   retry = 校验（本人 + status=-1）→ 截掉失败轮再生成 → 只更新失败行自身
- *   （content 走 updateFailedMessage，flows/status 收尾），不重复 user 消息、
- *   不重传图、不建新文件。
+ *   （成功走 finalizeFailedRetry 一次落齐 content/flows/status，失败走
+ *   updateFailedMessage 替文案并保持 -1），不重复 user 消息、不重传图、
+ *   不建新文件。
  *
- * prisma 分工说明：service 拥有全部数据面；本文件唯一例外是 retry 成功后
- * 对「失败行自身」flows/status 的收尾——updateFailedMessage 只管 content，
- * service 没有「替换失败行」的函数；用带归属条件的 updateMany（userId +
- * status=-1）收尾，与 service 的校验口径一致，并发重试谁先到谁生效。
+ * prisma 分工说明：service 拥有全部数据面，本文件零 prisma 直连（终审
+ * M5：retry 的 flows/status 收尾沉为 service.finalizeFailedRetry 的单条
+ * 带归属 updateMany；取行也走 service 的 findFirst 函数，不整表 load）。
  */
 
-import prisma from "~~/server/lib/prisma";
 import * as service from "~~/server/utils/chat/service";
-import { buildImageNumbering, buildOllamaMessages } from "~~/server/utils/chat/history";
+import { buildOllamaMessages, planImages } from "~~/server/utils/chat/history";
 import { extractFlowArray, normalizeFlows, type DraftFlow } from "~~/server/utils/chat/flows";
-import { chatStream, type OllamaCfg } from "~~/server/utils/chat/ollama";
+import { chatStream, OllamaError, type OllamaCfg } from "~~/server/utils/chat/ollama";
 import { createEventStream, readFormData, type H3Event } from "h3";
 import { error, getUserId, success } from "~~/server/utils/common";
 import path from "node:path";
@@ -59,9 +58,33 @@ const makeStream = (event: H3Event) => {
   return { stream, push };
 };
 
+/** 空回复占位文案（终审 M3）：模型只回了空数组时不让字面 "[]" 长驻气泡 */
+const EMPTY_REPLY_TEXT = "未识别到记账内容，可以直接说金额，例如：昨天午饭 35";
+
+/**
+ * 失败文案（终审 M2）：气泡里只给短中文，原始系统错误（fs/网络栈）不外露，
+ * 原文只进 console 日志。透传两类：OllamaError 的中文文案；本功能自己抛的
+ * 中文 Error（如「AI 回复解析失败」）。其余按 code 分类映射兜底。
+ */
 const failRowOf = (err: unknown): string => {
-  const m = String((err as Error)?.message ?? err ?? "生成失败");
-  return m || "生成失败";
+  if (err instanceof OllamaError) {
+    const m = (err as Error).message ?? "";
+    return m || "生成失败";
+  }
+  const code = String((err as NodeJS.ErrnoException)?.code ?? "");
+  if (code === "ENOENT") {
+    return "小票文件缺失，无法生成该消息";
+  }
+  if (code === "EACCES" || code === "EISDIR" || code === "EMFILE") {
+    return "小票文件无法读取，无法生成该消息";
+  }
+  const raw = String((err as Error)?.message ?? err ?? "");
+  // 中文开头的 message 视为本功能的用户文案（直接透传）；英文开头的原始
+  // 系统错误一律兜底，不给用户看栈内容
+  if (raw && !/^[A-Za-z]/.test(raw)) {
+    return raw;
+  }
+  return "生成失败，请稍后重试";
 };
 
 /**
@@ -80,10 +103,15 @@ const runTurn = async (event: H3Event, a: TurnArgs): Promise<void> => {
       a.mode === "retry" ? { beforeId: a.retryId } : undefined
     );
 
-    // 2. 图编号单一事实源（与 system 的 imageCount 同一张表）+ 读回 base64；
-    //    文件缺失让 loadImages 抛错走红 fail 路径（坏图不静默变空文本）
-    const numbered = buildImageNumbering(ctx.turns, service.CHAT_IMAGE_WINDOW);
-    const imgMap = await service.loadImages(a.dataDir, numbered);
+    // 2. 图计划单一事实源（终审 M1）：与 buildOllamaMessages 共享同一个
+    //    plan——只有真传集里的图才读盘，缺票半径收紧到真传的图（占位的
+    //    历史图文件坏了不再拖死整轮）；编号表仍派生 byIndex 反查与 prompt
+    //    的 imageCount（consistency 测试钉死的同源）。文件缺失走 fail 路径。
+    const plan = planImages(ctx.turns, service.CHAT_IMAGE_WINDOW);
+    const imgMap = await service.loadImages(
+      a.dataDir,
+      [...plan.attached].map((i) => plan.numbered[i - 1]).filter((n): n is string => !!n)
+    );
 
     // 3. 逐字流式；首个可见帧前吞掉 think 剥离残留的前导空行
     let began = false;
@@ -110,23 +138,24 @@ const runTurn = async (event: H3Event, a: TurnArgs): Promise<void> => {
     const current = a.mode === "retry" ? (ctx.turns.at(-1)?.images ?? []) : a.userImages;
     const flows: DraftFlow[] = normalizeFlows(raw, ctx.cand, ctx.today, {
       default: () => current, // 本次 user 消息的图（别的轮不搭便车）
-      byIndex: (i) => numbered[i - 1] ?? null, // 图i ← 全局编号表反查
+      byIndex: (i) => plan.numbered[i - 1] ?? null, // 图i ← 全局编号表反查
     });
     push({ t: "flows", flows });
 
-    // 6. 落库 assistant 行（done 帧的 id）+ 起名（静默）→ done 帧
+    // 6. 落库 assistant 行（done 帧的 id）+ 起名（静默）→ done 帧。
+    //    空回复占位（终审 M3）：模型只回了空数组时，气泡存一句可操作的
+    //    兜底文案，不让字面 "[]" 长驻；flows 仍存 "[]"（无卡可入账），
+    //    status 语义不变。
+    const stored = flows.length ? reply : EMPTY_REPLY_TEXT;
     let messageId = a.mode === "retry" ? a.retryId : 0;
     if (a.mode === "send") {
-      await service.appendAssistantMessage(a.userId, a.sessionId, reply, JSON.stringify(flows), 0); // 新卡片未入账 → 0
-      messageId = (await service.getMessages(a.userId, a.sessionId)).at(-1)?.id ?? 0;
+      await service.appendAssistantMessage(a.userId, a.sessionId, stored, JSON.stringify(flows), 0); // 新卡片未入账 → 0
+      messageId = await service.lastMessageId(a.userId, a.sessionId); // 终审 M4：findFirst 取最新一行
     } else {
-      await service.updateFailedMessage(a.userId, a.retryId, reply);
-      const upd = await prisma.chatMessage.updateMany({
-        where: { id: a.retryId, userId: a.userId, status: -1 },
-        data: { flows: JSON.stringify(flows), status: 0 }, // 新 flows 无 flowId → 未入账 → 0
-      });
-      if (upd.count === 0) {
-        console.warn(`[chat] retry ${a.retryId} 的 flows/status 回写落空（并发重试已先更新）`);
+      // 收尾终审 M5：content+flows+status 单条带归属的 updateMany 一次落
+      // 齐（原「content 一条 + flows/status 一条」的双语句竞态窗口就此消除）
+      if (!(await service.finalizeFailedRetry(a.userId, a.retryId, stored, JSON.stringify(flows)))) {
+        console.warn(`[chat] retry ${a.retryId} 的收尾落空（并发重试已先更新）`);
       }
     }
     push({ t: "done", messageId });
@@ -208,8 +237,9 @@ export const chatRetry = async (event: H3Event, dataDir: string, cfg: OllamaCfg)
       return error("请先选择账本");
     }
 
-    // 先校验后开流：属于本人 AND 在该会话里 AND status=-1（文案与 service 一致）
-    const msg = (await service.getMessages(userId, sessionId)).find((r) => r.id === messageId);
+    // 先校验后开流：属于本人 AND 在该会话里 AND status=-1（终审 M4：
+    // findFirst 直取该行，不再整表 load 后 find；文案口径与 service 一致）
+    const msg = await service.getMessage(userId, sessionId, messageId);
     if (!msg) {
       throw new Error("消息不存在");
     }
@@ -231,8 +261,18 @@ export const chatSave = async (form: FormData, userId: number) => {
     if (!bookId) {
       return error("请先选择账本");
     }
+    // 终审 M6：card 必须是「单个普通对象」的合法 JSON——parse 失败 / 非对象
+    // / 数组都在这层拦下（否则往下钻会在 saveCard 里炸出 TypeError）
     const raw = form.get("card");
-    if (!raw) {
+    let card: unknown = null;
+    if (raw) {
+      try {
+        card = JSON.parse(String(raw));
+      } catch {
+        // parse 失败保持 null → 下面统一按「卡片数据无效」拦截
+      }
+    }
+    if (!card || typeof card !== "object" || Array.isArray(card)) {
       return error("卡片数据无效");
     }
     const idxRaw = form.get("index");
@@ -240,7 +280,7 @@ export const chatSave = async (form: FormData, userId: number) => {
       userId,
       Number(form.get("messageId")) || 0,
       idxRaw === null ? Number.NaN : Number(idxRaw), // 缺省不许落到卡 0
-      JSON.parse(String(raw)),
+      card as DraftFlow,
       bookId
     ));
   } catch (err: any) {

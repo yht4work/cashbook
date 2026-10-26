@@ -258,14 +258,17 @@ model ChatMessage {
 - **已知 V1 限制**（都有记录，不阻塞验收）：
   - done 帧的 messageId 在并发发送下可能取错行（前端锁定输入防并发，
     单用户场景安全）。
-  - 会话历史窗口内若有一张小票文件缺失，该会话后续 send/retry 会以明确
-    错误文案失败，直到该轮滚出 20 条窗口（清理保证不误删被引用文件）。
-  - 首条消息后 done 帧延迟约 2s（服务端先完成 AI 起名再发 done）。
+  - 会话历史窗口内若有一张小票文件缺失会以明确错误文案失败；终审修复波次
+    （M1）后读盘只读「真传的图」（共享 planImages 的 attached 集），缺票半径
+    收紧到窗口内真传的图，占位的老图文件缺失不再拖死后续 send/retry。
+  - 首条消息后流收尾延迟约 2s：done 帧先发，AI 起名完成后才 close 流（客户
+    端解锁与侧栏面板刷新都在 close 之后，代码顺序为有意设计）。
   - 起名/正文偶发模型「指令复述」回声与孤立 think 闭合标签进 content
     （模型质量问题，prompt 加固跟进）。
   - `chatOnce` 仅连接超时、无读超时——ollama 接受连接后挂流会延迟
     done/fail 帧（cloud 模型低概率）。
 - **既有全站口径**（非本功能引入，仅记录）：流水写入不校验 bookId 归属
-  （与 add.ts 一致）；getMessages 对不存在/他人会话返回空数组而非 404；
-  手动 fetch（store SSE/retry/saveCard）路径的 c==400 不触发登录跳转，
-  与 doApi 路径不一致（仅 toast）。
+  （与 add.ts 一致）；getMessages 对不存在/他人会话返回空数组而非 404。
+- **登录跳转已统一**（终审波次 Parked#3）：手动 fetch（store 的 SSE
+  send/retry/removeApi 解包）路径对 c==400 复刻 doApi.intercepterResponse
+  语义，同样导向 /auth/login 并带 callbackUrl；不再只 toast。
