@@ -35,3 +35,4 @@
 - 并发同名小票双下载孤儿 URL：`chatImageBlob` 首次并发未命中缓存时各自下载，后写者胜出、先者的 URL 泄漏（不 revoke，仅浏览器侧）。
 - save 响应丢失不自愈窗：入账请求发出后响应丢失/网络中断时，服务端已落 Flow 而本地卡仍「待确认」，刷新才对齐（无自动重试/对账）。
 - 既有全站口径（非本功能引入，仅记录，见 T9/design 附录）：流水写入不校验 bookId 归属；`getMessages` 对不存在/他人会话返回空数组。手动 fetch 路径 c==400 不触发登录跳转一项已由终审波次（Parked#3）统一导向 /auth/login（带 callbackUrl）。
+- `deleteSession` 每次全量拉该用户所有带 invoice 的 Flow 建引用集（service.ts:87-91），当前量级无碍；数据量上来再改 per-session 直查。

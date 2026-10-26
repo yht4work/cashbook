@@ -176,13 +176,17 @@ export const appendAssistantMessage = async (
 
 // ==================== 上下文组装 ====================
 
-/** 候选值查询：与 getAttributions / flow/type/getAll 同法（distinct 单列 + 非空过滤） */
-const distinctFlowCol = async (bookId: string, userId: number, col: "industryType" | "payType" | "attribution"): Promise<string[]> => {
+/**
+ * 候选值查询：该 bookId 全域 distinct（与 getAttributions / flow/type/getAll 同法）。
+ * 不带 userId 条件——共享账本（Book.shareKey）下还有其他成员录入的取值，
+ * 候选值必须来自当前账本的全部实际取值；distinct 单列 + 非空过滤。
+ */
+const distinctFlowCol = async (bookId: string, col: "industryType" | "payType" | "attribution"): Promise<string[]> => {
   const rows: Array<Record<string, string | null>> = (await prisma.flow.findMany({
     distinct: [col],
     select: { [col]: true },
     orderBy: [{ [col]: "asc" }],
-    where: { bookId, userId },
+    where: { bookId },
   })) as Array<Record<string, string | null>>;
   return [
     ...new Set(rows.map((r) => String(r[col] ?? "").trim()).filter(Boolean)),
@@ -233,11 +237,11 @@ export const getContext = async (
       orderBy: { id: "desc" },
       take: CHAT_HISTORY_LIMIT,
     }),
-    distinctFlowCol(bookId, userId, "industryType"),
-    distinctFlowCol(bookId, userId, "payType"),
-    distinctFlowCol(bookId, userId, "attribution"),
+    distinctFlowCol(bookId, "industryType"),
+    distinctFlowCol(bookId, "payType"),
+    distinctFlowCol(bookId, "attribution"),
     prisma.flow.findMany({
-      where: { bookId, userId },
+      where: { bookId }, // 全账本口径（共享账本的其他成员录入的也在列）
       orderBy: [{ day: "desc" }, { id: "desc" }], // 「最近」按 day 读，回补旧流水不冒充最新
       take: RECENT_FLOW_COUNT,
     }),
@@ -266,7 +270,7 @@ export const getContext = async (
 
 // ==================== 失败重试 ====================
 
-export const updateFailedMessage = async (userId: number, messageId: number, content: string): Promise<string> => {
+export const updateFailedMessage = async (userId: number, messageId: number, content: string): Promise<void> => {
   const msg = await prisma.chatMessage.findFirst({ where: { id: messageId, userId } });
   if (!msg) {
     throw new Error("消息不存在");
@@ -275,13 +279,6 @@ export const updateFailedMessage = async (userId: number, messageId: number, con
     throw new Error("只有失败的消息可以重试");
   }
   await prisma.chatMessage.update({ where: { id: msg.id }, data: { content } });
-
-  // 该轮的前置 user 消息（重试不重传图、不重复落 user 消息，文件名从这里来）
-  const prior = await prisma.chatMessage.findFirst({
-    where: { sessionId: msg.sessionId, userId, role: "user", id: { lt: messageId } },
-    orderBy: { id: "desc" },
-  });
-  return prior?.images ?? "";
 };
 
 /**
@@ -357,6 +354,39 @@ export const saveCard = async (
       throw new Error("该卡片已入账");
     }
 
+    // 凭证池 = 本消息已存的全部卡的 invoices ∪ 该 assistant 消息的前置 user 行 images。
+    // 这正是前端 ChatDraftCard 的 ctxInvoices 池（同消息各卡 invoices ∪ 来源 user 行
+    // images），UI 正常路径不受影响；校验是端点契约面的加固——防「借 API 把别会话的
+    // chat-* 文件挂名躲清理/造坏链」。
+    const pool = new Set<string>();
+    for (const c of cards) {
+      for (const raw of (Array.isArray(c.invoices) ? c.invoices : []) as unknown[]) {
+        const name = String(raw ?? "").trim();
+        if (name) {
+          pool.add(name);
+        }
+      }
+    }
+    const prior = await tx.chatMessage.findFirst({
+      where: { sessionId: msg.sessionId, userId, role: "user", id: { lt: messageId } },
+      orderBy: { id: "desc" },
+    });
+    for (const img of (prior?.images ?? "").split(",")) {
+      const name = img.trim();
+      if (name) {
+        pool.add(name);
+      }
+    }
+
+    // 待写的 card.invoices 逐个 trim（非数组视为 []，维持原降级），任何一项
+    // trim 后不在池内或为空串 → 整个事务不落 Flow
+    const invoices = Array.isArray(card.invoices) ? card.invoices.map((v) => String(v ?? "").trim()) : [];
+    for (const name of invoices) {
+      if (!name || !pool.has(name)) {
+        throw new Error("小票凭证不在本消息的图集内，请刷新后重试");
+      }
+    }
+
     const flow = await tx.flow.create({
       data: {
         userId,
@@ -369,7 +399,7 @@ export const saveCard = async (
         name: String(card.name ?? ""),
         description: String(card.description ?? ""),
         attribution: String(card.attribution ?? ""),
-        invoice: Array.isArray(card.invoices) ? card.invoices.map(String).join(",") : "",
+        invoice: invoices.join(","), // 已校验、已 trim（请求里带的前后空白顺手洗掉）
       },
     });
     cards[index] = { ...cardForJson(card), flowId: flow.id };
@@ -416,6 +446,11 @@ export const ensureTitle = async (
   if (!title) {
     title = userText.slice(0, 20);
   }
+  if (!title) {
+    // 兜底链走完仍是空串（首条纯图消息 userText=""）：不落库空标题——title
+    // 保持 null，后续轮次的 ensureTitle 还有机会再起名
+    return null;
+  }
   await prisma.chatSession.update({ where: { id: session.id }, data: { title } });
   return title;
 };
@@ -427,7 +462,8 @@ export type SaveImageFile = { ext: string; data: Buffer };
 /** ext 白名单：最多 1 个前导点 + 1~5 位字母数字（防 ../ 之类的目录穿越写盘） */
 const EXT_RE = /^\.?[a-zA-Z0-9]{1,5}$/;
 
-/** 存小票图：文件名 chat-{sessionId}-{ts}-{n}.{ext}，返回落地的文件名列表 */
+/** 存小票图：文件名 chat-{sessionId}-{ts}-{n}.{ext}，返回落地的文件名列表
+ * （中途某张写盘失败 → 已落盘的本批文件回滚删掉再重抛，不留半写孤儿；终审 R1 M3） */
 export const saveImages = async (
   userId: number,
   sessionId: number,
@@ -448,14 +484,29 @@ export const saveImages = async (
   await fs.mkdir(dir, { recursive: true });
   const ts = Date.now();
   const names: string[] = [];
-  for (let i = 0; i < files.length; i++) {
-    let ext = String(files[i].ext ?? "").trim();
-    if (ext && !ext.startsWith(".")) {
-      ext = "." + ext;
+  try {
+    for (let i = 0; i < files.length; i++) {
+      let ext = String(files[i].ext ?? "").trim();
+      if (ext && !ext.startsWith(".")) {
+        ext = "." + ext;
+      }
+      const name = `chat-${sessionId}-${ts}-${i + 1}${ext}`;
+      await fs.writeFile(path.join(dir, name), files[i].data);
+      names.push(name);
     }
-    const name = `chat-${sessionId}-${ts}-${i + 1}${ext}`;
-    await fs.writeFile(path.join(dir, name), files[i].data);
-    names.push(name);
+  } catch (e) {
+    // 半写回滚（best-effort）：单文件 unlink 失败 ENOENT 静默、其余 console.error
+    // 后继续清剩下的；错误原始重抛——目录不残留只写了一半的批次
+    for (const n of names) {
+      try {
+        await fs.unlink(path.join(dir, n));
+      } catch (ue) {
+        if ((ue as NodeJS.ErrnoException)?.code !== "ENOENT") {
+          console.error(`[chat] 会话 ${sessionId} 的小票 ${n} 半写回滚失败`, ue);
+        }
+      }
+    }
+    throw e;
   }
   return names;
 };

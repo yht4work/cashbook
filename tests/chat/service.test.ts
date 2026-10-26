@@ -41,6 +41,7 @@ const BOOK_DEL = "test-chat-del";
 const BOOK_CTX = "test-chat-ctx";
 const BOOK_SAVE = "test-chat-save";
 const BOOK_CAND = "test-chat-cand";
+const BOOK_SHARED = "test-chat-shared";
 
 let tmpDir: string;
 
@@ -48,7 +49,7 @@ const wipe = async (): Promise<void> => {
   // FK RESTRICT：先删消息再删会话；流水独立
   await prisma.chatMessage.deleteMany({ where: { userId: { in: [UID, UID_OTHER] } } });
   await prisma.chatSession.deleteMany({ where: { userId: { in: [UID, UID_OTHER] } } });
-  await prisma.flow.deleteMany({ where: { userId: UID } });
+  await prisma.flow.deleteMany({ where: { userId: { in: [UID, UID_OTHER] } } });
 };
 
 beforeAll(async () => {
@@ -73,11 +74,13 @@ const mkFlow = async (
     money?: number;
     name?: string;
     invoice?: string;
-  }
+  },
+  /** 共享账本口径（C1）：可为别的成员 userId 种行（userId 与 bookId 相互独立） */
+  userId: number = UID
 ): Promise<number> => {
   const row = await prisma.flow.create({
     data: {
-      userId: UID,
+      userId,
       bookId,
       day: o.day ?? "2026-10-25",
       flowType: o.flowType !== undefined ? o.flowType : "支出",
@@ -442,6 +445,25 @@ describe("getContext", () => {
     expect(full.cand).toEqual(ctx.cand);
     expect(full.today).toBe(ctx.today);
   });
+
+  it("候选值与最近摘要按 bookId 全域共享口径：另一个 userId 录入的取值也在列", async () => {
+    // 共享账本的真实数据形态：Flow.userId 与 bookId 相互独立——同一本账里，
+    // 999999 自己的取值和另一个成员（999998）录入的取值并存
+    await mkFlow(BOOK_SHARED, { day: "2026-10-20", industryType: "公交", payType: "公交卡", attribution: "我", name: "我的班车", money: 2 });
+    await mkFlow(BOOK_SHARED, { day: "2026-10-28", industryType: "差旅", payType: "里程兑换", attribution: "合伙人", name: "合伙人的机票", money: 880 }, UID_OTHER);
+
+    const { id } = await createSession(UID);
+    const ctx = await getContext(UID, id, BOOK_SHARED);
+
+    // cand 含共享账本其他成员的取值（bookId 全域 distinct，不是「本 userId 专属」）
+    expect(ctx.cand.industry).toContain("差旅");
+    expect(ctx.cand.pay).toContain("里程兑换");
+    expect(ctx.cand.attribution).toContain("合伙人");
+    // 最近流水摘要同为全账本口径：day 最新的「合伙人的机票」落在摘要里
+    expect(ctx.system).toContain("该账本最近 2 条流水");
+    expect(ctx.system).toContain("合伙人的机票");
+    expect(ctx.system).toContain("我的班车");
+  });
 });
 
 describe("todayOf", () => {
@@ -483,6 +505,8 @@ describe("saveCard", () => {
 
   it("编辑后的卡建 Flow 行、flows 回写 flowId、剩卡未齐时 status 仍 0", async () => {
     const { id } = await createSession(UID);
+    // 凭证池来源（M1）：前置 user 行的 images 就是这两张卡片的挂票来源
+    await appendUserMessage(UID, id, "拍的小票", ["chat-a.png", "chat-b.png"]);
     const msgId = await seedCards(id);
     const edited: DraftFlow = {
       day: "2026-10-23",
@@ -606,25 +630,85 @@ describe("saveCard", () => {
     await expect(saveCard(UID, 999999002, 0, card, BOOK_SAVE)).rejects.toThrow("消息不存在");
     await prisma.flow.deleteMany({ where: { id: { in: (await prisma.flow.findMany({ where: { bookId: BOOK_SAVE } })).map((f) => f.id) } } });
   });
+
+  /** 造一条「凭证齐全」的消息：前置 user 行拍了两张图，卡 0 自身也挂了一张（池=三份并集） */
+  const seedPoolCards = async (sessionId: number): Promise<number> => {
+    await appendUserMessage(UID, sessionId, "拍的小票", ["chat-100-1-u.png", "chat-100-2-u.png"]);
+    const msg = await prisma.chatMessage.create({
+      data: {
+        sessionId,
+        userId: UID,
+        role: "assistant",
+        content: "识别到 2 条流水",
+        status: 0,
+        flows: JSON.stringify([
+          { day: "2026-10-24", flowType: "支出", industryType: "餐饮", payType: "微信", money: 35, name: "午饭", description: "", attribution: "家里", invoices: ["chat-100-3-a.png"] },
+          { day: "2026-10-24", flowType: "支出", industryType: "", payType: "", money: 15, name: "奶茶", description: "", attribution: "", invoices: [] },
+        ]),
+      },
+    });
+    return msg.id;
+  };
+
+  it("凭证池：本消息各卡 invoices ∪ 前置 user 行 images（与前端 ChatDraftCard 同池），池内文件带前后空白放行且落库已 trim", async () => {
+    const { id } = await createSession(UID);
+    const card = (): DraftFlow => ({
+      day: "2026-10-24", flowType: "支出", industryType: "", payType: "", money: 15, name: "奶茶", description: "", attribution: "", invoices: [],
+    });
+
+    const msgId = await seedPoolCards(id);
+    // (a) 来自前置 user 行 images 的文件名
+    const fromUser = await saveCard(UID, msgId, 1, { ...card(), invoices: ["chat-100-2-u.png"] }, BOOK_SAVE);
+    expect((await prisma.flow.findUnique({ where: { id: fromUser.flowId } }))!.invoice).toBe("chat-100-2-u.png");
+
+    // (d) 来自另一张卡的 invoices，带前后空格 → 放行，落库值已 trim（顺手洗前后空白）
+    const msg2 = await seedPoolCards(id);
+    const fromCard = await saveCard(UID, msg2, 1, { ...card(), invoices: [" chat-100-3-a.png "] }, BOOK_SAVE);
+    expect((await prisma.flow.findUnique({ where: { id: fromCard.flowId } }))!.invoice).toBe("chat-100-3-a.png");
+
+    await prisma.flow.deleteMany({ where: { id: { in: [fromUser.flowId, fromCard.flowId] } } });
+  });
+
+  it("凭证池外文件/纯空白 invoices → 拒绝，整套不落 Flow、flows 回写原样", async () => {
+    const { id } = await createSession(UID);
+    const msgId = await seedPoolCards(id);
+    const card = (invoices: string[]): DraftFlow => ({
+      day: "2026-10-24", flowType: "支出", industryType: "", payType: "", money: 15, name: "奶茶", description: "", attribution: "", invoices,
+    });
+
+    // (b) 混入一张池外文件（借 API 把别处 chat-* 挂名）→ 中文报错
+    await expect(
+      saveCard(UID, msgId, 1, card(["chat-999-伪造.png"]), BOOK_SAVE)
+    ).rejects.toThrow("小票凭证不在本消息的图集内，请刷新后重试");
+    await expect(
+      saveCard(UID, msgId, 1, card(["chat-100-1-u.png", "chat-999-伪造.png"]), BOOK_SAVE)
+    ).rejects.toThrow("小票凭证不在本消息的图集内");
+    // (c) 纯空白项同样拒
+    await expect(saveCard(UID, msgId, 1, card(["  "]), BOOK_SAVE)).rejects.toThrow("小票凭证不在本消息的图集内");
+
+    expect(await prisma.flow.count({ where: { userId: UID, bookId: BOOK_SAVE } })).toBe(0);
+    const stored = JSON.parse((await prisma.chatMessage.findUnique({ where: { id: msgId } }))!.flows!);
+    expect(stored[1]).not.toHaveProperty("flowId");
+    expect((await prisma.chatMessage.findUnique({ where: { id: msgId } }))!.status).toBe(0);
+  });
 });
 
 describe("updateFailedMessage", () => {
-  it("失败消息改 content，返回该轮前置 user 消息的 images（重试用）", async () => {
+  it("失败消息只改 content；返回值收敛为 void（重试取图走 getContext，不再回传 images）", async () => {
     const { id } = await createSession(UID);
     await appendUserMessage(UID, id, "小票给你", ["u1.png", "u2.png"]);
     const fail = await prisma.chatMessage.create({
       data: { sessionId: id, userId: UID, role: "assistant", content: "生成失败", status: -1 },
     });
 
-    const images = await updateFailedMessage(UID, fail.id, "重新生成的文案");
+    await expect(updateFailedMessage(UID, fail.id, "重新生成的文案")).resolves.toBeUndefined();
 
-    expect(images).toBe("u1.png,u2.png");
     const row = await prisma.chatMessage.findUnique({ where: { id: fail.id } });
     expect(row!.content).toBe("重新生成的文案");
     expect(row!.status).toBe(-1); // 只改 content，状态不动
   });
 
-  it("status≠-1 / 别人的消息 → 抛错；失败消息前面没有 user 消息 → 空 images", async () => {
+  it("status≠-1 / 别人的消息 → 抛错；前置没有 user 行也照样只改 content（不再查前置行取图）", async () => {
     const { id } = await createSession(UID);
     await appendAssistantMessage(UID, id, "正常回复", null, 0);
     const okMsg = await prisma.chatMessage.create({
@@ -636,7 +720,7 @@ describe("updateFailedMessage", () => {
     const orphanFail = await prisma.chatMessage.create({
       data: { sessionId: id, userId: UID, role: "assistant", content: "失败", status: -1 },
     });
-    expect(await updateFailedMessage(UID, orphanFail.id, "改一下")).toBe("");
+    expect(await updateFailedMessage(UID, orphanFail.id, "改一下")).toBeUndefined();
   });
 });
 
@@ -740,6 +824,12 @@ describe("ensureTitle", () => {
     expect((await sessionOf(id)).title).toBe(userText.slice(0, 20));
     expect(await ensureTitle(UID, 999999004, "x", "y")).toBeNull();
   });
+
+  it("兜底链走完仍为空（无 cfg + 首条纯图 userText=\"\"）→ 不落库空标题：返回 null、title 保持 null", async () => {
+    const { id } = await createSession(UID);
+    expect(await ensureTitle(UID, id, "", "回复")).toBeNull();
+    expect((await sessionOf(id)).title).toBeNull(); // title 保持 null，后续轮次还有机会再起名
+  });
 });
 
 describe("saveImages / loadImages", () => {
@@ -762,6 +852,40 @@ describe("saveImages / loadImages", () => {
     const map = await loadImages(tmpDir, names);
     expect(map.get(names[0])).toBe(b1.toString("base64"));
     expect(map.get(names[1])).toBe(b2.toString("base64"));
+  });
+
+  it("半写回滚：第 2 张写盘失败 → 本次已落盘的第 1 张删掉、目录无残留，原始错误重抛", async () => {
+    const { id } = await createSession(UID);
+    const dir = path.join(tmpDir, "images");
+    await fsp.mkdir(dir, { recursive: true });
+    const residue = async (): Promise<string[]> => (await fsp.readdir(dir)).filter((n) => n.startsWith(`chat-${id}-`));
+    expect(await residue()).toEqual([]);
+
+    // service.ts 以默认导入拿 node:fs/promises 的默认导出对象，spyOn 即可截获
+    const real = fsp.writeFile.bind(fsp) as unknown as (p: string, data: Buffer | string) => Promise<void>;
+    let calls = 0;
+    const spy = vi
+      .spyOn(fsp, "writeFile")
+      .mockImplementation((async (p: unknown, data: unknown) => {
+        calls += 1;
+        if (calls === 1) {
+          return real(p as string, data as Buffer); // 第 1 张放行，真写
+        }
+        throw Object.assign(new Error("EACCES"), { code: "EACCES" }); // 第 2 张起失败
+      }) as unknown as typeof fsp.writeFile);
+    try {
+      await expect(
+        saveImages(UID, id, [
+          { ext: ".png", data: Buffer.from("第一张") },
+          { ext: ".png", data: Buffer.from("第二张") },
+        ], tmpDir)
+      ).rejects.toThrow("EACCES");
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(calls).toBe(2);
+    expect(await residue()).toEqual([]); // 第 1 张被回滚删掉，目录无半写孤儿
   });
 
   it(" hostile 入参整体拒绝（白名单外 ext / 无效 data）：一个文件都不写", async () => {
