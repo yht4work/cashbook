@@ -2,17 +2,17 @@
 
 > 生成：Task 10（2026-10-26）。逐项核对设计文档 `docs/superpowers/specs/2026-10-25-ai-chat-bookkeeping-design.md` 的 `## 验收`（L234-249）。
 > 判定口径：**✅** = 已验证（附证据指针）；**待环境** = 环境修复后代跑（脚本/思路已就绪）；**用户可自测** = 需用户配合操作。未验过的项不打钩。
-> 分支 `feat/ai-chat-bookkeeping`；证据路径：`.superpowers/sdd/2026-10-25-ai-chat-bookkeeping/task-{N}-report.md`（下称 T{N}）、截图 `/tmp/cb-shot/*.png`、日志 `verify*.log`（/tmp，不入库）、Task 10 验证脚本 `t10-verify.cjs` + `t10-verify.log`（18/18 PASS，console 全程 0 error）。Task 10 截图：`t10-retry-streaming.png`（重试流式中另钮禁用）、`t10-retry-done.png`（失败行原地替换为卡片行）、`t10-title.png`（面板标题刷新）。
+> 分支 `feat/ai-chat-bookkeeping`；证据路径：`.superpowers/sdd/2026-10-25-ai-chat-bookkeeping/task-{N}-report.md`（下称 T{N}）、截图 `/tmp/cb-shot/*.png`、日志 `verify*.log`（/tmp，不入库）、Task 10 验证脚本 `t10-verify.cjs` + `t10-verify.log`（21/21 PASS，console 全程 0 error）。Task 10 截图：`t10-retry-streaming.png`（重试流式中另钮禁用）、`t10-retry-done.png`（失败行原地替换为卡片行）、`t10-title.png`（面板标题刷新）、`t10-rendergate.png`（纯 JSON 正文隐藏 / 叙述可见双形态）。真实上传端到端（2026-10-26 权限修复后补跑）：`t9-upload-e2e.cjs` + `t9-upload-e2e.log`（16/16 PASS、console 0）。
 
 ## 验收清单（设计文档逐项）
 
 | # | 项目 | 判定 | 证据 |
 |---|------|------|------|
-| 1 | 上传多张小票 + 一句话 | 待环境 | `dataPath/images` root 属主 EACCES（T6 Concerns 1 / T9「等待环境修复的待跑验证」）；controller 代跑脚本已就绪：`/tmp/cb-shot/t9-upload-e2e.cjs`（--keep 可复核） |
+| 1 | 上传多张小票 + 一句话 | ✅（2026-10-26 权限修复后补验） | `data/images` 属主修复（root→yh.tao）后 controller 代跑 `/tmp/cb-shot/t9-upload-e2e.cjs`：**16/16 PASS、console 0**（`t9-upload-e2e.log`）——canvas 生成 3 件商品小票 → 真实上传（user 行带服务端文件名 `chat-1013-*.png`）→ 模型拆 3 卡（名称/单价×数量全对）→ 每卡同挂本票 → 前两卡入账成功；999998 清场归零 |
 | 1 | 逐字流式回复 | ✅ | T6 帧时间戳实测逐字（34 帧 ~10-16ms 递进）；T8 截图 `t8-stream-1/2/3.png` 中间帧 |
 | 1 | N 张卡片 → 改类型/账本 → 入账 | ✅ | T9（41 playwright 断言 + psql 双向核对：改类型入账落编辑值、候选下拉真值、再入账拒绝）；截图 `t9-card-edit.png` / `t9-card-booked.png` / `t9-cards-all-booked.png` |
-| 1 | 流水管理页可见新流水且 invoice 图可显示；消息状态已入账 | ✅（流水落库与状态）/ 待环境（invoice 图页内直显） | 流水落 `ChatMessage.flows` + Flow 行（T9 psql：`DB flow1/flow2 照录`、`ChatMessage.status=1`）；invoice 图在「流水管理页」的直显依赖图片写盘环境（EACCES），随 #1 待环境 |
-| 2 | 一张小票拆多项（2 条流水挂同一张小票；卡片去票→该条 invoice 空） | 待环境（真拆）/ ✅（卡片增删票的 UI 与入账语义） | 真实「上传→AI 拆多项」随 #1 待环境；卡片上增删小票双向可逆 + 入账落库语义已验：T9（勾选池补挂/取消、`DB flow1 invoice 为空、flow2 不受影响`） |
+| 1 | 流水管理页可见新流水且 invoice 图可显示；消息状态已入账 | ✅（完整） | 流水落 `ChatMessage.flows` + Flow 行（T9 psql：`DB flow1/flow2 照录`、`ChatMessage.status=1`）；e2e 补验（2026-10-26，`t9-upload-e2e.log` 16/16）：`Flow#2.invoice` 挂上传小票、文件在盘、show 直显经 blob 正常；流水管理页/编辑弹窗与 chat 同走 `doApi.download("api/entry/flow/invoice/show")` 路径（`FlowsTable.vue:563` / `FlowTable.vue:792` / `FlowEditInvoiceDialog.vue:217`），既有机制未变 |
+| 2 | 一张小票拆多项（2 条流水挂同一张小票；卡片去票→该条 invoice 空） | ✅（完整：真拆+UI 双向） | 真实拆分（2026-10-26，`t9-upload-e2e.log` 16/16）：3 件商品→3 条流水且均挂同一张小票；去票方向（`Flow#1 invoice` 空）与留票方向（`Flow#2 invoice`=该票）同轮验证；卡片上增删小票双向可逆 + 入账落库语义：T9（勾选池补挂/取消、`DB flow1 invoice 为空、flow2 不受影响`） |
 | 3 | 刷新页面重进会话：历史与卡片状态（含已入卡跳转）完整保留 | ✅ | T8 `t8-desktop-reload.png`（刷新持久性）；T9「刷新回读」（两卡仍 marked booked，`t9-cards-all-booked.png`） |
 | 4 | 删除会话：确认后消失；已入账流水的 invoice 图仍能打开 | ✅ | T9 `t9-session-del.cjs`（ChatSession/ChatMessage 归 0；真收据 md5 删前删后一致 `/tmp/cb-shot/t9-receipt-md5-*.txt`，文件未被清理故 show 接口仍可打开）；截图 `desktop-chat-confirm.png` / `desktop-chat-deleted.png` |
 | 5 | 纯文字「昨天午饭 35」→ 一张卡片，day 自动昨天，bookId 默认当前账本 | ✅ | T6 ①②（smoke）；T10 `t10-verify.cjs`（重试再生成的卡 `day=2026-10-25`、money 35、name 午饭，psql 照录）；入账落所选账本：T9 psql（两 Flow 均 bookId=t9-card） |
