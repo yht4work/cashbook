@@ -6,9 +6,11 @@ import { Alert } from "~/utils/alert";
 
 /**
  * 输入区（Task 8）：textarea（Enter 发送 / Shift+Enter 换行，IME 组合输入时
- * Enter 不发送——桌面键盘习惯为准）+ 小票选图（可预览待发、可移除，blob
- * 预览 URL 在移除/发送后 revoke）+ 发送按钮。生成中（store.streaming）整体
- * 禁用；发送行为全部走 store.send（锁输入 / 校验 / 失败后重发都在 store）。
+ * Enter 不发送——桌面键盘习惯为准）+ 小票入图（两路：选图按钮 / 输入框直接
+ * 粘贴剪贴板图（V1.2，配合截图工具），可预览待发、可移除，blob 预览 URL 在
+ * 移除/发送后 revoke）+ 发送按钮。生成中（store.streaming）整体禁用；
+ * 发送行为全部走 store.send——await 到 true（请求已发出）即清空文本与待发
+ * 图，不等整轮生成读完（锁输入 / 校验 / 失败收尾都在 store）。
  */
 const store = useChatStore();
 
@@ -80,7 +82,7 @@ const IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|heic|heif|avif)$/i;
 const isImageFile = (f: File): boolean =>
   String(f.type || "").startsWith("image/") || IMG_EXT_RE.test(String(f.name || ""));
 
-const addFiles = (fl: FileList | null): void => {
+const addFiles = (fl: FileList | File[] | null): void => {
   const list = Array.from(fl ?? []).filter(isImageFile);
   const dropped = (fl ? fl.length : 0) - list.length;
   if (dropped > 0) {
@@ -121,6 +123,20 @@ const onKeydown = (e: KeyboardEvent): void => {
   }
   e.preventDefault();
   toSend();
+};
+
+/**
+ * 剪贴板直贴入图（V1.2 反馈：PC 截图工具的产物进不了文件选择器）：粘贴
+ * 内容带文件（截图/网页复制图）时收进待发预览并拦默认行为——个别浏览器
+ * 会把文件名当文本塞进输入框；纯文本粘贴不拦，照常进 textarea。
+ */
+const onPaste = (e: ClipboardEvent): void => {
+  const files = e.clipboardData?.files;
+  if (!files || files.length === 0) {
+    return;
+  }
+  e.preventDefault();
+  addFiles(files);
 };
 
 /** 多行时 textarea 自增高（上限 168px），空/单行回弹 */
@@ -200,6 +216,7 @@ watch(text, () => {
         :placeholder="placeholder"
         :disabled="store.streaming"
         @keydown="onKeydown"
+        @paste="onPaste"
         @compositionstart="composing = true"
         @compositionend="composing = false"
       ></textarea>

@@ -18,6 +18,9 @@ export default defineConfig({
       "~~": root,
       "@": path.join(root, "app"),
       "@@": root,
+      // store 级前端契约测试用：app 模块 import 的 #imports 在 node 测试环境
+      // 无真实 nuxt 运行时，指到最小桩（tests/stubs/nuxt-imports.ts）
+      "#imports": path.join(root, "tests/stubs/nuxt-imports.ts"),
     },
   },
 });

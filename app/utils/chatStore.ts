@@ -453,8 +453,12 @@ export const useChatStore = defineStore("chat", {
      * 本地先挂 user 行与流式 assistant 行：delta 增量拼进流式行、flows
      * 帧挂上卡片、done 固化该行（真实 messageId/id）并回读服务端事实；
      * fail 落一条 status=-1 行。全程 streaming 状态锁输入。
-     * 返回 boolean（终审 M8）：true=通过预检、请求已发出（调用方可清输入），
+     * 返回 boolean（终审 M8）：true=通过预检、请求已发出（调用方即刻清输入），
      * false=被前置校验拦下（锁输入/无账本/空消息，未发请求）。
+     * 请求发出后 send 立即 resolve——流式收尾（帧消费/落库回读/blob 回收）
+     * 在后台继续推进（V1.2 反馈：此前要等整轮 SSE 读完才回，视觉生成动辄
+     * 十几秒，输入区待发图一直挂着、移除钮被 streaming 锁死；流式中断本就
+     * resolve true，失败兜底语义不变）。
      * 懒创建（T13）：currentId=null（草稿态）时先建档再发——会话只随首次
      * 发送产生，失败上抛时输入保留。
      */
@@ -529,63 +533,71 @@ export const useChatStore = defineStore("chat", {
       const streamRow = this.messages[this.messages.length - 1];
       const userRow = this.messages[this.messages.length - 2];
       this.streaming = true;
-      const ctx = { flowCards: null as DraftFlow[] | null };
-      let finished = false;
 
-      try {
-        const res = await fetch("/api/entry/chat/send", {
-          method: "POST",
-          headers: authHeader(),
-          body: fd,
-          credentials: "include",
-        });
-        // 校验类失败（请先选择账本/会话不存在/文件名异常等）是普通 JSON 而非 SSE
-        if (!String(res.headers.get("content-type") || "").includes("text/event-stream")) {
-          const data = await unwrapResult(res);
-          Alert.error(data?.m || `发送失败（${res.status}）`);
-        } else {
-          await consumeSse(res, (frame) => {
-            if (finished) {
-              return; // done/fail 之后的帧丢弃
-            }
-            const end = applyFrame(streamRow, frame, ctx);
-            if (end) {
-              finished = true;
-            }
+      // 流的消费移后台（V1.2 反馈）：返回值语义「请求已发出，调用方可清输入」
+      // 必须立即兑现——此前一直等整轮 SSE 读完才 resolve，移动端视觉生成动辄
+      // 十几秒，期间输入区的待发图一直挂着、移除钮被 streaming 锁死。UI 状态
+      // 全在 store 行与 streaming 标志上，后台推进即可；IIFE 内自吞错（下面
+      // catch/finally 不再外抛），不会产生未处理的 rejection。
+      void (async (): Promise<void> => {
+        const ctx = { flowCards: null as DraftFlow[] | null };
+        let finished = false;
+        try {
+          const res = await fetch("/api/entry/chat/send", {
+            method: "POST",
+            headers: authHeader(),
+            body: fd,
+            credentials: "include",
           });
-        }
-      } catch (e) {
-        console.warn("[chat] 本次发送的生成流中断", e);
-      } finally {
-        this.streaming = false;
-        streamRow.streaming = false;
-        if (streamRow.status === null) {
-          // 未走到 done/fail（JSON 校验错误/网络中断/流被断开）——本地按
-          // 失败行处理，随后 loadMessages 以服务端事实替换
-          streamRow.status = -1;
-          if (!streamRow.content) {
-            streamRow.content = "生成失败";
+          // 校验类失败（请先选择账本/会话不存在/文件名异常等）是普通 JSON 而非 SSE
+          if (!String(res.headers.get("content-type") || "").includes("text/event-stream")) {
+            const data = await unwrapResult(res);
+            Alert.error(data?.m || `发送失败（${res.status}）`);
+          } else {
+            await consumeSse(res, (frame) => {
+              if (finished) {
+                return; // done/fail 之后的帧丢弃
+              }
+              const end = applyFrame(streamRow, frame, ctx);
+              if (end) {
+                finished = true;
+              }
+            });
           }
-        }
-        if (this.currentId === sessionId) {
-          await this.loadMessages(sessionId);
-        }
-        await this.loadSessions();
-        // 顺手修：回收本轮待发行 pendingImages 的 blob URL。发送收尾后
-        // 气泡缩略图一律由 loadMessages 的服务端行接管（show 接口地址），
-        // 这些 blob 不再被引用；已切走会话时回看同样走 loadMessages 替换。
-        if (userRow) {
-          const blobs = userRow.pendingImages ?? [];
-          userRow.pendingImages = undefined;
-          for (const u of blobs) {
-            try {
-              URL.revokeObjectURL(u);
-            } catch {
-              // 已失效，忽略
+        } catch (e) {
+          console.warn("[chat] 本次发送的生成流中断", e);
+        } finally {
+          this.streaming = false;
+          streamRow.streaming = false;
+          if (streamRow.status === null) {
+            // 未走到 done/fail（JSON 校验错误/网络中断/流被断开）——本地按
+            // 失败行处理，随后 loadMessages 以服务端事实替换
+            streamRow.status = -1;
+            if (!streamRow.content) {
+              streamRow.content = "生成失败";
+            }
+          }
+          if (this.currentId === sessionId) {
+            await this.loadMessages(sessionId);
+          }
+          await this.loadSessions();
+          // 顺手修：回收本轮待发行 pendingImages 的 blob URL。发送收尾后
+          // 气泡缩略图一律由 loadMessages 的服务端行接管（show 接口地址），
+          // 这些 blob 不再被引用；已切走会话时回看同样走 loadMessages 替换。
+          if (userRow) {
+            const blobs = userRow.pendingImages ?? [];
+            userRow.pendingImages = undefined;
+            for (const u of blobs) {
+              try {
+                URL.revokeObjectURL(u);
+              } catch {
+                // 已失效，忽略
+              }
             }
           }
         }
-      }
+      })();
+
       return true;
     },
 
