@@ -235,6 +235,8 @@ export type ChatContext = {
   cand: { industry: string[]; pay: string[]; attribution: string[] };
   /** 组装 system 时的「今天」（normalizeFlows 的 dayFallback 同源用） */
   today: string;
+  /** 与 system 同源的账本候选（V1.2：卡片分账本；normalizeFlows/saveCard 同源） */
+  books: Array<{ bookId: string; bookName: string }>;
 };
 
 export const getContext = async (
@@ -246,7 +248,7 @@ export const getContext = async (
 ): Promise<ChatContext> => {
   await ownSession(userId, sessionId);
 
-  const [rows, industry, pay, attribution, recent] = await Promise.all([
+  const [rows, industry, pay, attribution, recent, bookRows] = await Promise.all([
     prisma.chatMessage.findMany({
       where: {
         sessionId,
@@ -264,7 +266,14 @@ export const getContext = async (
       orderBy: [{ day: "desc" }, { id: "desc" }], // 「最近」按 day 读，回补旧流水不冒充最新
       take: RECENT_FLOW_COUNT,
     }),
+    /* 账本候选（V1.2 反馈「自建共享不区分」）：按 userId 查全部——共享账本在
+     * inshare.ts 是复制一条带加入者 userId 的行，这里天然一起出来。同一 bookId
+     * 只可能因 inshare 复制而重名不重 id，按 bookId 去重。 */
+    prisma.book.findMany({ where: { userId }, select: { bookId: true, bookName: true } }),
   ]);
+  const books = [
+    ...new Map(bookRows.map((b) => [b.bookId, { bookId: b.bookId, bookName: b.bookName }])).values(),
+  ].sort((a, b) => a.bookId.localeCompare(b.bookId));
 
   const turns: ChatTurn[] = rows.reverse().map((r) => ({
     role: r.role,
@@ -280,11 +289,17 @@ export const getContext = async (
 
   // 图编号单一事实源：prompt 的 imageCount 就传编号表长（接线见 consistency.test.ts）
   const system = [
-    buildSystemPrompt({ ...cand, today, imageCount: buildImageNumbering(turns, CHAT_IMAGE_WINDOW).length }),
+    buildSystemPrompt({
+      ...cand,
+      today,
+      imageCount: buildImageNumbering(turns, CHAT_IMAGE_WINDOW).length,
+      books,
+      currentBookId: bookId,
+    }),
     ...recentFlowSummary(recent),
   ].join("\n");
 
-  return { system, turns, cand, today };
+  return { system, turns, cand, today, books };
 };
 
 // ==================== 失败重试 ====================
@@ -310,11 +325,11 @@ export const finalizeFailedRetry = async (
   userId: number,
   messageId: number,
   content: string,
-  flows: string
+  flows: string | null
 ): Promise<boolean> => {
   const upd = await prisma.chatMessage.updateMany({
     where: { id: messageId, userId, status: -1 },
-    data: { content, flows, status: 0 }, // 新 flows 无 flowId → 未入账 → 0
+    data: { content, flows, status: 0 }, // 新 flows 无 flowId → 未入账 → 0；纯文字回复落 null
   });
   return upd.count > 0;
 };
@@ -333,7 +348,8 @@ const parseCards = (raw: string | null): Array<Record<string, unknown>> | null =
   }
 };
 
-/** 编辑卡的写回白名单（AI 预填的 imageIdx 与请求里的杂键都不残留） */
+/** 编辑卡的写回白名单（AI 预填的 imageIdx 与请求里的杂键都不残留；bookId
+ *  是 V1.2 的入账目标——缺省空串，回写时由入参 bookId 覆盖成真实落账本） */
 const cardForJson = (c: DraftFlow): Record<string, unknown> => ({
   day: String(c.day ?? ""),
   flowType: String(c.flowType ?? ""),
@@ -343,6 +359,7 @@ const cardForJson = (c: DraftFlow): Record<string, unknown> => ({
   description: String(c.description ?? ""),
   attribution: String(c.attribution ?? ""),
   invoices: Array.isArray(c.invoices) ? c.invoices.map(String) : [],
+  bookId: String(c.bookId ?? ""),
   money: moneyOf(c.money),
 });
 
@@ -371,6 +388,12 @@ export const saveCard = async (
     }
     if (cardBooked(cards[index])) {
       throw new Error("该卡片已入账");
+    }
+    // 入账目标账本必须真实属于该用户（V1.2）：bookId 与 bookName 一样只认
+    // 归属校验后的映射结果——防借 API 把卡记进别人的/不存在的账本
+    const book = await tx.book.findFirst({ where: { userId, bookId } });
+    if (!book) {
+      throw new Error("入账账本不存在");
     }
 
     // 凭证池 = 本消息已存的全部卡的 invoices ∪ 该 assistant 消息的前置 user 行 images。
@@ -421,7 +444,8 @@ export const saveCard = async (
         invoice: invoices.join(","), // 已校验、已 trim（请求里带的前后空白顺手洗掉）
       },
     });
-    cards[index] = { ...cardForJson(card), flowId: flow.id };
+    // 回写 bookId 用入参（已过归属校验的落账本），卡里 AI/前端带的原值覆盖掉
+    cards[index] = { ...cardForJson(card), bookId, flowId: flow.id };
 
     // 状态派生：全部卡片都有 flowId → 1，否则 0（与 history 的折叠判定同口径）
     const allSaved = cards.every(cardBooked);

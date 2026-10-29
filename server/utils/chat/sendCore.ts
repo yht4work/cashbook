@@ -64,7 +64,7 @@ const EMPTY_REPLY_TEXT = "未识别到记账内容，可以直接说金额，例
 /**
  * 失败文案（终审 M2）：气泡里只给短中文，原始系统错误（fs/网络栈）不外露，
  * 原文只进 console 日志。透传两类：OllamaError 的中文文案；本功能自己抛的
- * 中文 Error（如「解析失败：未能从回复中识别出流水内容」）。其余按 code 分类映射兜底。
+ * 中文 Error（如「入账账本不存在」）。其余按 code 分类映射兜底。
  */
 const failRowOf = (err: unknown): string => {
   if (err instanceof OllamaError) {
@@ -130,33 +130,40 @@ const runTurn = async (event: H3Event, a: TurnArgs): Promise<void> => {
     const out = await chatStream(a.cfg, buildOllamaMessages(ctx.system, ctx.turns, (n) => imgMap.get(n) ?? "", service.CHAT_IMAGE_WINDOW), onDelta);
     const reply = (out.content ?? "").trim(); // 落库正文 trim（流式侧同源处理）
 
-    // 5. 解析 + 归一 → flows 帧（无 flowId/imageIdx；invoices=最终文件名）
+    // 5. 解析 + 归一 → flows 帧（无 flowId/imageIdx；invoices=最终文件名）。
+    //    V1.2 反馈：回复不强制只有卡片——正文取不到 JSON 数组即纯文字回复
+    //    （正常落一条无卡片的 status=0 行），不再判「解析失败」；取到数组
+    //    则归一，卡片带上按账本名映射的 bookId（与 prompt 同源候选）。
     const raw = extractFlowArray(reply);
-    if (!raw) {
-      // 文案以中文开头（终审微修）：failRowOf 的英文启发式会把以 "AI" 开头
-      // 的自家消息误判成原始系统错误兜底掉
-      throw new Error("解析失败：未能从回复中识别出流水内容");
-    }
     const current = a.mode === "retry" ? (ctx.turns.at(-1)?.images ?? []) : a.userImages;
-    const flows: DraftFlow[] = normalizeFlows(raw, ctx.cand, ctx.today, {
-      default: () => current, // 本次 user 消息的图（别的轮不搭便车）
-      byIndex: (i) => plan.numbered[i - 1] ?? null, // 图i ← 全局编号表反查
-    });
-    push({ t: "flows", flows });
+    let flows: DraftFlow[] = [];
+    if (raw) {
+      flows = normalizeFlows(
+        raw,
+        ctx.cand,
+        ctx.today,
+        {
+          default: () => current, // 本次 user 消息的图（别的轮不搭便车）
+          byIndex: (i) => plan.numbered[i - 1] ?? null, // 图i ← 全局编号表反查
+        },
+        { books: ctx.books, currentBookId: a.bookId }
+      );
+      push({ t: "flows", flows });
+    }
+    const flowsJson = raw ? JSON.stringify(flows) : null; // 纯文字回复 flows 落 null
 
     // 6. 落库 assistant 行（done 帧的 id）+ 起名（静默）→ done 帧。
-    //    空回复占位（终审 M3）：模型只回了空数组时，气泡存一句可操作的
-    //    兜底文案，不让字面 "[]" 长驻；flows 仍存 "[]"（无卡可入账），
-    //    status 语义不变。
-    const stored = flows.length ? reply : EMPTY_REPLY_TEXT;
+    //    气泡文案：有卡片 → 模型原文；空数组/纯空且模型没说别的 → 占位
+    //    文案（终审 M3：不让字面 "[]" 长驻气泡）。
+    const stored = flows.length || reply.replace(/[\[\]\s]/g, "") ? reply : EMPTY_REPLY_TEXT;
     let messageId = a.mode === "retry" ? a.retryId : 0;
     if (a.mode === "send") {
-      await service.appendAssistantMessage(a.userId, a.sessionId, stored, JSON.stringify(flows), 0); // 新卡片未入账 → 0
+      await service.appendAssistantMessage(a.userId, a.sessionId, stored, flowsJson, 0); // 新卡片未入账 → 0
       messageId = await service.lastMessageId(a.userId, a.sessionId); // 终审 M4：findFirst 取最新一行
     } else {
       // 收尾终审 M5：content+flows+status 单条带归属的 updateMany 一次落
       // 齐（原「content 一条 + flows/status 一条」的双语句竞态窗口就此消除）
-      if (!(await service.finalizeFailedRetry(a.userId, a.retryId, stored, JSON.stringify(flows)))) {
+      if (!(await service.finalizeFailedRetry(a.userId, a.retryId, stored, flowsJson))) {
         console.warn(`[chat] retry ${a.retryId} 的收尾落空（并发重试已先更新）`);
       }
     }

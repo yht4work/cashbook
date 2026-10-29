@@ -41,6 +41,8 @@ export interface DraftFlow {
   description: string;
   attribution: string;
   invoices: string[]; // 卡片挂的小票文件名（用户在卡片上增删的最终结果）
+  /** 入账目标账本（V1.2：卡片分账本）。AI 归一映射预填；入账回写实际落账本 */
+  bookId?: string;
   flowId?: number; // 入账成功后回写的 Flow.id；>0 即已入账
 }
 
@@ -278,6 +280,32 @@ const applyFrame = (
 /** bookId 直接读 localStorage（项目惯例：当前账本不进 pinia） */
 const bookIdOf = (): string =>
   typeof localStorage === "undefined" ? "" : localStorage.getItem("bookId") || "";
+
+// ==================== 账本候选（V1.2：卡片分账本） ====================
+
+/**
+ * 本人名下的账本列表（book/list；卡片入账下拉与概览「记入」徽标共用）。
+ * 60s 内存缓存：账本列表变动频率极低，一次 send 出多张卡时不必逐卡打接口；
+ * 失败返回空数组（调用方各自降级：下拉回当前账本、徽标不显示）。
+ */
+let chatBookListCache: { at: number; rows: Array<{ bookId: string; bookName: string }> } | null = null;
+export const chatBookList = async (): Promise<Array<{ bookId: string; bookName: string }>> => {
+  if (chatBookListCache && Date.now() - chatBookListCache.at < 60_000) {
+    return chatBookListCache.rows;
+  }
+  try {
+    const rows = (await doApi.post<Array<{ bookId: string; bookName: string }>>("api/entry/book/list", {})) || [];
+    chatBookListCache = {
+      at: Date.now(),
+      rows: rows
+        .filter((b) => b && b.bookId)
+        .map((b) => ({ bookId: String(b.bookId), bookName: String(b.bookName ?? "") })),
+    };
+  } catch {
+    // toast 已提示；空列表 → 下拉回退当前账本、徽标不显示
+  }
+  return chatBookListCache?.rows ?? [];
+};
 
 /** 服务端消息行 → 本地渲染行（flows JSON 串同步拆成 flowCards） */
 const normalizeRow = (
@@ -714,10 +742,11 @@ export const useChatStore = defineStore("chat", {
       const d = await doApi.postform<{ flowId: number }>("api/entry/chat/save", fd);
       const flowId = Number(d?.flowId) || 0;
 
-      // 本地同步：编辑值 + flowId 写回 + status 派生（服务端行已同值落库）
+      // 本地同步：编辑值 + flowId 写回 + status 派生（服务端行已同值落库）；
+      // bookId 记「实际入的账本」（与服务端回写同值，AI 预填/旧卡缺键都被覆盖）
       const msg = this.messages.find((m) => m.id === mid);
       if (msg && msg.flowCards && msg.flowCards[idx]) {
-        msg.flowCards[idx] = { ...msg.flowCards[idx], ...card, flowId };
+        msg.flowCards[idx] = { ...msg.flowCards[idx], ...card, bookId: bookIdFinal, flowId };
         msg.flows = JSON.stringify(msg.flowCards);
         msg.status = msg.flowCards.every(cardBooked) ? 1 : 0;
       }

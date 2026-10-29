@@ -7,27 +7,29 @@ import { TagIcon } from "@heroicons/vue/24/outline";
 import { Alert } from "~/utils/alert";
 import { doApi } from "~/utils/api";
 import { getIndustryType, getPayType } from "~/utils/apis";
-import type { Book } from "~/utils/table";
-import { cardBooked, chatImageBlob, useChatStore, type DraftFlow } from "~/utils/chatStore";
+import { cardBooked, chatBookList, chatImageBlob, useChatStore, type DraftFlow } from "~/utils/chatStore";
 import UiDatePicker from "~/components/ui/DatePicker.vue";
+import ChatImageViewer from "~/components/chat/ChatImageViewer.vue";
 
 /**
  * 流水草稿确认卡（Task 9）：AI 产出的一条 DraftFlow → 概览 → 编辑 → 入账。
  *
  * - 概览态：徽标（已入账=绿角标 + 「查看流水」链接 /flows?highlight=<flowId>；
- *   未入账=灰「待确认」）+ 字段摘要 + 小票缩略图；未入账有「编辑」（进表单）
- *   与「入账」（直接入账）。
+ *   未入账=灰「待确认」）+ 字段摘要（卡带 bookId 时附「记入 账本名」）+ 小票
+ *   缩略图；未入账有「编辑」（进表单）与「入账」（直接入账）。
  * - 编辑态：day 用 UiDatePicker（显式 import）；flowType 下拉（FlowEditDialog
  *   同口：支出/收入/不计收支，可留空）；industryType/payType/attribution 是
  *   「候选下拉 + 自由文本」组合框——候选一律来自当前账本（localStorage.bookId 的
  *   实际取值：getIndustryType/getPayType/getAttributions，flowType 变则重拉）；
- *   money 数字输入；name/description 文本；账本下拉来自 book/list，默认当前
- *   账本，仅 V1 允许改到别的账本——入账以最终选择为准。
+ *   money 数字输入；name/description 文本；账本下拉来自 chatBookList（60s 缓存），
+ *   默认卡片的 bookId（AI 按账本名归一映射的落账本）、没带则当前账本——入账以
+ *   最终选择为准（V1.2：一部分卡片走医保、一部分走现金，从选账本开始）。
  * - 小票勾选：缩略图带勾选态，点击 = card.invoices 增删（仅未入账可改）；
  *   图挂了留「加载失败」占位仍可取消勾选，不让死文件悄悄留在卡上。
  * - 入账：规范化（day 缺省/非法补今天、money 与服务端 moneyOf 同口径、名称
- *   兜底「未命名流水」）→ store.saveCard(messageId, index, card, bookId)；
- *   成功后 store 把 flowId 与本次编辑值合并回卡片，卡片转只读。
+ *   兜底「未命名流水」）→ store.saveCard(messageId, index, card, bookId)，其中
+ *   bookId=表单最终选择 → 卡片预填（card.bookId）→ 当前账本 三级回退；
+ *   成功后 store 把 flowId/bookId 与本次编辑值合并回卡片，卡片转只读。
  * - 已入卡锁定：不渲染编辑/入账/勾选控件；再入账服务端也以「该卡片已入账」拒绝。
  *
  * props.editing：外部初始/驱动的编辑态（默认收起）；开关由卡片自持。
@@ -286,24 +288,44 @@ const pickCand = (f: "industry" | "pay" | "attribution", v: string): void => {
 
 // ---------- 账本选择（入账以最终选择为准） ----------
 
-const books = ref<Book[]>([]);
+const books = ref<Array<{ bookId: string; bookName: string }>>([]);
 const selectedBook = ref("");
 
+/** chatBookList 自带 60s 缓存：多条卡同时挂载只打一次接口 */
 const loadBooks = async (): Promise<void> => {
-  try {
-    books.value = (await doApi.post<Book[]>("api/entry/book/list", {})) || [];
-  } catch {
-    // toast 已提示；下拉仍显示当前账本
+  const rows = await chatBookList();
+  // 失败返回空列表：下拉仍显示当前账本（chatBookList 内部已 toast）
+  if (!rows.length && books.value.length) {
+    return; // 保旧名单，不清空已装载的下拉
   }
+  books.value = rows;
   const cur = localStorage.getItem("bookId") || "";
   // 当前账本不在列表（已被删等边缘）：前面补一条占位项，避免表单悄悄丢选择
   if (cur && !books.value.some((b) => b.bookId === cur)) {
-    books.value = [{ ...books.value[0], bookId: cur, bookName: `${cur}（当前账本）` }, ...books.value] as Book[];
+    books.value = [{ bookId: cur, bookName: `${cur}（当前账本）` }, ...books.value];
   }
   if (!selectedBook.value) {
-    selectedBook.value = cur;
+    // 预选：卡片带的 bookId（AI 归一映射的落账本）优先，没带回当前账本
+    const sug = props.card.bookId || "";
+    selectedBook.value = sug && books.value.some((b) => b.bookId === sug) ? sug : cur;
   }
 };
+
+/** 概览「记入」徽标的账本名（bookId → 名字；名单未就绪时先空着不显示） */
+const overviewBookName = computed(
+  () => books.value.find((b) => b.bookId === props.card.bookId)?.bookName ?? ""
+);
+
+// 卡带 bookId（AI 拆账本/已入账回写）而名单还没就绪 → 拉一次概览徽标用的名单
+watch(
+  () => [Boolean(props.card.bookId), books.value.length] as const,
+  ([hasBook, loaded]) => {
+    if (hasBook && !loaded) {
+      void loadBooks();
+    }
+  },
+  { immediate: true }
+);
 
 // ---------- 入账 ----------
 
@@ -346,8 +368,9 @@ const onBook = async (): Promise<void> => {
   if (booked.value || saving.value || props.streaming) {
     return; // 已入卡/进行中/流式中（行 id 未固化必被拒）不再发请求（服务端同样以「该卡片已入账」闭环）
   }
-  // 入账目标账本 = 卡片上最终选择；没进过编辑（概览直接入账）时回退当前账本
-  const book = selectedBook.value || localStorage.getItem("bookId") || "";
+  // 入账目标账本 = 卡片上最终选择 → 卡片预填（card.bookId，AI 拆账本的落点）
+  // → 当前账本 三级回退（概览直接入账时 selectedBook 还没选过）
+  const book = selectedBook.value || props.card.bookId || localStorage.getItem("bookId") || "";
   if (!book) {
     Alert.error("请先选择账本");
     return;
@@ -372,7 +395,8 @@ const openEdit = (): void => {
   }
   draft.value = { ...props.card, invoices: [...props.card.invoices] };
   editing.value = true;
-  selectedBook.value = selectedBook.value || localStorage.getItem("bookId") || "";
+  // 预选：编辑过保留上次选择 → 卡片预填 → 当前账本
+  selectedBook.value = selectedBook.value || props.card.bookId || localStorage.getItem("bookId") || "";
   loadCandidates();
   loadBooks();
 };
@@ -383,6 +407,9 @@ const cancelEdit = (): void => {
   // 收起=取消编辑：本次选过的账本一并作废（否则之后概览里直接入账会吃进已放弃的选择）
   selectedBook.value = "";
 };
+
+/** 概览缩略的大图蒙版（V1.2 反馈：不再 blob: 新标签页） */
+const viewerSrc = ref("");
 
 const loadCandidates = (): void => {
   loadIndustry();
@@ -444,6 +471,13 @@ const flowLink = computed(() =>
       <span v-if="card.industryType" data-chat-card-industry>{{ card.industryType }}</span>
       <span v-if="card.payType" data-chat-card-pay-type>{{ card.payType }}</span>
       <span v-if="card.attribution" data-chat-card-attribution>{{ card.attribution }}</span>
+      <span
+        v-if="overviewBookName"
+        data-chat-card-book
+        class="rounded bg-surface-muted px-1.5 py-0.5 font-medium dark:bg-surface-darkMuted"
+      >
+        记入 {{ overviewBookName }}
+      </span>
       <span data-chat-card-invoice-count>小票 {{ card.invoices.length }} 张</span>
     </div>
     <p
@@ -454,16 +488,17 @@ const flowLink = computed(() =>
       {{ card.description }}
     </p>
 
-    <!-- 概览小票缩略（blob 直显；点击开大图；已入卡展示的就是入账时挂在流水上的小票） -->
+    <!-- 概览小票缩略（blob 直显；点击开页内大图蒙版；已入卡展示的就是入账时挂在流水上的小票） -->
     <div v-if="!editing && card.invoices.length" class="mt-2 flex flex-wrap gap-1.5" data-chat-card-thumb-list="true">
       <template v-for="n in card.invoices" :key="n">
-        <a
+        <button
           v-if="thumbOf(n)"
-          :href="thumbOf(n)"
-          target="_blank"
-          rel="noopener"
+          type="button"
+          data-chat-card-thumb
           class="block h-14 w-14 overflow-hidden rounded-md border border-frame bg-surface dark:border-frame-dark dark:bg-surface-darkMuted"
-          :title="n"
+          :title="`${n}（查看大图）`"
+          :aria-label="`查看小票大图：${n}`"
+          @click="viewerSrc = thumbOf(n)"
         >
           <img
             :src="thumbOf(n)"
@@ -472,7 +507,7 @@ const flowLink = computed(() =>
             loading="lazy"
             @error="markFailed(n)"
           />
-        </a>
+        </button>
         <span
           v-else
           class="flex h-14 w-14 items-center justify-center rounded-md border border-frame bg-surface-muted text-center text-[10px] leading-tight text-ink-muted dark:border-frame-dark dark:bg-surface-darkMuted"
@@ -741,5 +776,8 @@ const flowLink = computed(() =>
         {{ saving ? "入账中…" : "入账" }}
       </button>
     </div>
+
+    <!-- 大图蒙版（fixed 脱流，不影响卡片布局） -->
+    <ChatImageViewer :src="viewerSrc" :open="!!viewerSrc" @close="viewerSrc = ''" />
   </div>
 </template>

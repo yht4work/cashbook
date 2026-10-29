@@ -522,6 +522,14 @@ describe("todayOf", () => {
 });
 
 describe("saveCard", () => {
+  /** 归属校验需要真实 Book 行：种 BOOK_SAVE（入账目标），用后即清 */
+  beforeAll(async () => {
+    await prisma.book.create({ data: { bookId: BOOK_SAVE, bookName: "测试入账本", userId: UID } });
+  });
+  afterAll(async () => {
+    await prisma.book.deleteMany({ where: { userId: UID, bookId: { startsWith: "test-chat-" } } });
+  });
+
   /** 造一条有两张卡的 assistant 消息（status 0，第 0 张带 imageIdx 预填） */
   const seedCards = async (sessionId: number, status = 0): Promise<number> => {
     const msg = await prisma.chatMessage.create({
@@ -570,6 +578,11 @@ describe("saveCard", () => {
 
     const res = await saveCard(UID, msgId, 0, edited, BOOK_SAVE);
 
+    // 账本候选（V1.2）：getContext 与 prompt/normalizeFlows 吃同一份「本人名下」账本表
+    const ctx = await getContext(UID, id, BOOK_SAVE);
+    expect(ctx.books).toContainEqual({ bookId: BOOK_SAVE, bookName: "测试入账本" });
+    expect(ctx.system).toContain("测试入账本"); // 当前账本名注入了 prompt
+
     const flow = await prisma.flow.findUnique({ where: { id: res.flowId } });
     expect(flow).toEqual({
       id: res.flowId,
@@ -590,8 +603,8 @@ describe("saveCard", () => {
 
     const stored = JSON.parse((await prisma.chatMessage.findUnique({ where: { id: msgId } }))!.flows!);
     expect(Object.keys(stored[0]).sort()).toEqual([
-      "attribution", "day", "description", "flowId", "flowType", "industryType", "invoices", "money", "name", "payType",
-    ]); // 白名单字段（AI 的 imageIdx 预填不残留）
+      "attribution", "bookId", "day", "description", "flowId", "flowType", "industryType", "invoices", "money", "name", "payType",
+    ]); // 白名单字段（AI 的 imageIdx 预填不残留；bookId 为 V1.2 的落账本）
     expect(stored[0].flowId).toBe(res.flowId);
     expect(stored[1]).toEqual({ day: "2026-10-24", flowType: "支出", industryType: "", payType: "", money: 15, name: "奶茶", description: "", attribution: "", invoices: [] });
     expect((await prisma.chatMessage.findUnique({ where: { id: msgId } }))!.status).toBe(0); // 卡片未齐 → 保持 0
@@ -614,8 +627,8 @@ describe("saveCard", () => {
     const msg = await prisma.chatMessage.findUnique({ where: { id: msgId } });
     expect(msg!.status).toBe(1);
     expect(JSON.parse(msg!.flows!)).toEqual([
-      { day: "2026-10-24", flowType: "支出", industryType: "", payType: "", money: 35, name: "午饭", description: "", attribution: "", invoices: [], flowId: first.flowId },
-      { day: "2026-10-24", flowType: "支出", industryType: "", payType: "", money: 15, name: "奶茶", description: "", attribution: "", invoices: [], flowId: second.flowId },
+      { day: "2026-10-24", flowType: "支出", industryType: "", payType: "", money: 35, name: "午饭", description: "", attribution: "", invoices: [], bookId: BOOK_SAVE, flowId: first.flowId },
+      { day: "2026-10-24", flowType: "支出", industryType: "", payType: "", money: 15, name: "奶茶", description: "", attribution: "", invoices: [], bookId: BOOK_SAVE, flowId: second.flowId },
     ]);
     expect(second.flowId).not.toBe(first.flowId);
     await prisma.flow.deleteMany({ where: { id: { in: [first.flowId, second.flowId] } } });
@@ -676,6 +689,9 @@ describe("saveCard", () => {
     await expect(saveCard(UID, msgId, 2, card, BOOK_SAVE)).rejects.toThrow("卡片不存在");
     await expect(saveCard(UID, msgId, -1, card, BOOK_SAVE)).rejects.toThrow("卡片不存在");
     await expect(saveCard(UID, 999999002, 0, card, BOOK_SAVE)).rejects.toThrow("消息不存在");
+    // 归属校验（V1.2 加固）：入账目标账本必须属于该用户，别人名下的 bookId 拒绝且不落 Flow
+    await expect(saveCard(UID, msgId, 1, card, "test-chat-别人的")).rejects.toThrow("入账账本不存在");
+    expect(await prisma.flow.count({ where: { userId: UID, bookId: "test-chat-别人的" } })).toBe(0);
     await prisma.flow.deleteMany({ where: { id: { in: (await prisma.flow.findMany({ where: { bookId: BOOK_SAVE } })).map((f) => f.id) } } });
   });
 

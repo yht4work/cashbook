@@ -4,12 +4,14 @@ import { ExclamationTriangleIcon } from "@heroicons/vue/24/outline";
 import { chatImageBlob, useChatStore, type ChatMessageItem } from "~/utils/chatStore";
 /* 显式 import（Nuxt dev 自动导入不收编新组件） */
 import ChatDraftCard from "~/components/chat/ChatDraftCard.vue";
+import ChatImageViewer from "~/components/chat/ChatImageViewer.vue";
 
 /**
  * 单条消息气泡（Task 8 渲染层）：
- * - user：右对齐，文字 + 小票缩略行（点击锚点用 blob 开大图；show 接口要求
- *   裸 Authorization 头，<img>/<a> 带不上，缩略一律 chatImageBlob 直显）；
- *   待发行（pending）缩略图用 blob 预览，落地后由 loadMessages 的服务端行接管。
+ * - user：右对齐，文字 + 小票缩略行（点击站内大图蒙版预览——V1.2 反馈不再
+ *   blob: 新开标签页；show 接口要求裸 Authorization 头，<img>/<a> 带不上，
+ *   缩略一律 chatImageBlob 直显）；待发行（pending）缩略图用 blob 预览，
+ *   落地后由 loadMessages 的服务端行接管。
  * - assistant：左对齐，叙述文本简单换行渲染（whitespace-pre-wrap，不解析 markdown）；
  *   首部 trim 一次（旧数据可能残留前导空行）。
  * - 流式行（msg.streaming）显示打字光标；内容未到时显示三点待机。
@@ -95,7 +97,7 @@ watch(
 interface Thumb {
   key: string; // 去重/失败标记的键：待发行用 blob URL，落地行用文件名
   src: string; // 缩略图地址（blob URL）
-  full: string; // 大图地址（同一 blob，新标签页直开）
+  full: string; // 大图地址（同一 blob，交给站内蒙版预览）
   live: boolean; // 是否还在发送中（blob 预览）
 }
 
@@ -109,6 +111,9 @@ const thumbs = computed<Thumb[]>(() => {
     .filter((n) => blobUrls.value[n] && !broken.value.includes(n))
     .map((n) => ({ key: n, src: blobUrls.value[n], full: blobUrls.value[n], live: false }));
 });
+
+/** 大图蒙版：点缩略图 → 页内全屏（V1.2 反馈，不再 blob: 新标签页） */
+const viewerSrc = ref("");
 
 const onThumbError = (key: string): void => {
   if (!broken.value.includes(key)) {
@@ -174,19 +179,20 @@ const hideNarration = computed<boolean>(() => {
   >
     <!-- user 气泡 -->
     <div v-if="isUser" class="w-fit max-w-[88%] md:max-w-[72%] min-w-0">
-      <!-- 小票缩略行（待发行 blob / 落地行 show 接口；点击开大图） -->
+      <!-- 小票缩略行（待发行 blob / 落地行 show 接口；点击站内大图蒙版） -->
       <div
         v-if="thumbs.length"
         class="mb-1 flex flex-wrap justify-end gap-1.5"
       >
-        <a
+        <button
           v-for="t in thumbs"
           :key="t.key"
-          :href="t.full"
-          target="_blank"
-          rel="noopener"
+          type="button"
+          data-chat-thumb
           class="block h-16 w-16 md:h-20 md:w-20 flex-shrink-0 overflow-hidden rounded-lg border border-frame dark:border-frame-dark bg-surface-soft dark:bg-surface-darkMuted"
           :title="t.live ? '小票（发送中）' : '查看小票大图'"
+          :aria-label="t.live ? '查看小票大图（发送中）' : '查看小票大图'"
+          @click="viewerSrc = t.full"
         >
           <img
             :src="t.src"
@@ -195,7 +201,7 @@ const hideNarration = computed<boolean>(() => {
             loading="lazy"
             @error="onThumbError(t.key)"
           />
-        </a>
+        </button>
       </div>
       <div
         v-if="textOf"
@@ -274,6 +280,9 @@ const hideNarration = computed<boolean>(() => {
         </div>
       </div>
     </div>
+
+    <!-- 大图蒙版（fixed 脱流，不影响气泡布局） -->
+    <ChatImageViewer :src="viewerSrc" :open="!!viewerSrc" @close="viewerSrc = ''" />
   </div>
 </template>
 

@@ -75,4 +75,19 @@ describe("三件套用同一张编号表", () => {
     expect(out[2].invoices).toEqual(["d1.png", "d2.png"]);
     expect(out[3].invoices).toEqual(["z1.png"]); // 占位图也在表里，编号都能反查
   });
+
+  it("账本同源接线：prompt 候选与 normalizeFlows 的 bookId 映射吃同一份账本列表", () => {
+    const books = [{ bookId: "b1", bookName: "现金" }, { bookId: "b2", bookName: "医保" }];
+    const p = buildSystemPrompt({ ...cand, today: "2026-10-25", imageCount: 0, books, currentBookId: "b1" });
+    expect(p).toContain("现金、医保"); // 名字列表与 normalize 吃的同一份
+    const lookup: ImageLookup = { default: () => [], byIndex: () => null };
+    const out = normalizeFlows(
+      [{ name: "自付", bookName: "现金" }, { name: "统筹", bookName: "医保" }, { name: "没点名" }],
+      cand,
+      "2026-10-25",
+      lookup,
+      { books, currentBookId: "b1" }
+    );
+    expect(out.map((f) => f.bookId)).toEqual(["b1", "b2", "b1"]);
+  });
 });

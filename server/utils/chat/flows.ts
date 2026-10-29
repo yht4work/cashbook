@@ -20,6 +20,9 @@ export type DraftFlow = {
   description: string;
   attribution: string;
   invoices: string[];
+  /** 入账目标账本（V1.2 反馈：卡片分账本）。模型只输出 bookName，归一映射成
+   *  bookId；没注入账本时缺省 undefined（UI 回退当前账本——既有行为不变）。 */
+  bookId?: string;
   flowId?: number;
 };
 
@@ -29,6 +32,16 @@ export type ImageLookup = {
   default: () => string[];
   /** 图编号 → 文件名；编号必须来自 buildImageNumbering 的全局连续表 */
   byIndex: (i: number) => string | null;
+};
+
+/**
+ * 账本候选注入（V1.2 反馈：卡片分账本）：模型只输出 bookName（名字），
+ * 归一按名字精确映射成 bookId，映射不上的兜底 currentBookId。账本列表与
+ * prompt 注入吃同一份（getContext 一次查出传两头，consistency 钉住同源）。
+ */
+export type BookLookup = {
+  books: Array<{ bookId: string; bookName: string }>;
+  currentBookId: string;
 };
 
 /**
@@ -137,11 +150,27 @@ const imageIdxOf = (v: unknown): number[] | null => {
   return [...new Set(src.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
 };
 
+/** 账本名 → bookId：精确命中；重名优先当前账本那条；落不上→currentBookId。
+ *  AI 自己塞的 bookId 键不吃进来（防越权直通），映射只认名字。 */
+const bookIdOf = (list: BookLookup): ((v: unknown) => string) => {
+  const books = list.books ?? [];
+  const hit = (name: string): string => {
+    const m = books.filter((b) => b.bookName === name);
+    return (m.find((b) => b.bookId === list.currentBookId) ?? m[0])?.bookId ?? list.currentBookId;
+  };
+  return (v) => {
+    const t = textOf(v);
+    return t ? hit(t) : list.currentBookId;
+  };
+};
+
 export const normalizeFlows = (
   raw: unknown[],
   cand: { industry: string[]; pay: string[]; attribution: string[] },
   dayFallback: string,
-  img: ImageLookup
+  img: ImageLookup,
+  /** 账本注入（可选）：不传时 bookId 缺省 undefined——调用方回退当前账本（既有行为不变） */
+  books?: BookLookup
 ): DraftFlow[] => {
   const out: DraftFlow[] = [];
   for (const item of raw) {
@@ -166,6 +195,7 @@ export const normalizeFlows = (
       description: textOf(c.description),
       attribution: pickFrom(cand.attribution, c.attribution),
       invoices,
+      ...(books ? { bookId: bookIdOf(books)(c.bookName) } : {}),
     });
   }
   return out;

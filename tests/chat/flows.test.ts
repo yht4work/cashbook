@@ -180,4 +180,58 @@ describe("normalizeFlows", () => {
       invoices: [],
     }]);
   });
+
+  // 账本归一（V1.2 反馈：卡片要能分账本）——模型只输出 bookName（名字），
+  // 归一负责映射成 bookId：精确命中 / 没写·编造·重名 → 当前账本兜底
+  describe("normalizeFlows 账本归一", () => {
+    const books = [
+      { bookId: "book-cash", bookName: "现金" },
+      { bookId: "book-yibao", bookName: "医保" },
+    ];
+
+    it("bookName 精确命中 → 对应 bookId；没写/编造 → 兜底当前账本", () => {
+      const out = normalizeFlows(
+        [
+          { name: "统筹报账", bookName: "医保" },
+          { name: "自付现金", bookName: "现金" },
+          { name: "没点名" },
+          { name: "乱写", bookName: "股票账户" },
+        ],
+        cand,
+        FALLBACK,
+        imgOf(() => null),
+        { books, currentBookId: "book-cash" }
+      );
+      expect(out.map((f) => f.bookId)).toEqual(["book-yibao", "book-cash", "book-cash", "book-cash"]);
+    });
+
+    it("bookName 首尾空白可容忍；重名账本优先当前账本那条", () => {
+      const out = normalizeFlows(
+        [{ name: "x", bookName: " 现金 " }],
+        cand,
+        FALLBACK,
+        imgOf(() => null),
+        { books: [{ bookId: "a", bookName: "现金" }, { bookId: "b", bookName: "现金" }], currentBookId: "b" }
+      );
+      expect(out[0].bookId).toBe("b");
+    });
+
+    it("books 为空 → 全部落当前账本；不传注入时 bookId 缺省（既有调用方行为不变）", () => {
+      const empty = normalizeFlows([{ name: "x", bookName: "医保" }], cand, FALLBACK, imgOf(() => null), { books: [], currentBookId: "cur" });
+      expect(empty[0].bookId).toBe("cur");
+      const noinj = normalizeFlows([{ name: "x", bookName: "医保" }], cand, FALLBACK, imgOf(() => null));
+      expect(noinj[0].bookId).toBeUndefined();
+    });
+
+    it("AI 塞进来的 bookId 键不吃进来（只认 bookName，防越权账本直通) ", () => {
+      const out = normalizeFlows(
+        [{ name: "x", bookId: "book-yibao" }],
+        cand,
+        FALLBACK,
+        imgOf(() => null),
+        { books, currentBookId: "book-cash" }
+      );
+      expect(out[0].bookId).toBe("book-cash");
+    });
+  });
 });
