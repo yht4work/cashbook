@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { ExclamationTriangleIcon } from "@heroicons/vue/24/outline";
 import { chatImageBlob, useChatStore, type ChatMessageItem } from "~/utils/chatStore";
+import { chatNarrationText } from "~/utils/chatNarration";
 /* 显式 import（Nuxt dev 自动导入不收编新组件） */
 import ChatDraftCard from "~/components/chat/ChatDraftCard.vue";
 import ChatImageViewer from "~/components/chat/ChatImageViewer.vue";
@@ -131,44 +132,20 @@ const canRetry = computed<boolean>(
   () => props.msg.status === -1 && !!props.msg.id && !store.streaming
 );
 
-/** 正文整段 = 可解析的 JSON 数组（与 server extractFlowArray 的整段语义配对的本地纯判定） */
-const isPureFlowJson = (text: string): boolean => {
-  const t = (text ?? "").trim();
-  if (!t.startsWith("[")) {
-    return false;
-  }
-  try {
-    return Array.isArray(JSON.parse(t));
-  } catch {
-    return false;
-  }
-};
-
-/** 流式中间态判定：以 [ 起头且目前没出现 JSON 之外的叙述文字（最后一个 }
- *  之后只余闭括号/逗号/空白——think:true 下正文确定是顶层纯 JSON 数组） */
-const jsonLikeSoFar = (text: string): boolean => {
-  const t = (text ?? "").trim();
-  const tail = t.lastIndexOf("}") === -1 ? "" : t.slice(t.lastIndexOf("}") + 1);
-  return t.startsWith("[") && !/[^\s\],]/.test(tail);
-};
-
 /**
- * 正文段显隐（Task 10 评审修复 #1，渲染侧 only——落库仍是全文，server 不动）：
- * 卡片到齐后，正文若整段就是卡片本身的 JSON 数组，就不再把裸 JSON 渲染进
- * 气泡（卡片即正文）；真实叙述（JSON 之外的任何文字，含 JSON 混叙述：
- * 「好的，已解析：[...]」）照常可见。流式阶段按前缀判定：还看不清是否叙述
- * 时先用待机点兜住，不让半截 JSON 一字一字闪出来；流完若确有叙述自动放行。
+ * 正文段显隐（2026-10-30 用户反馈，渲染侧 only——落库仍是全文，server 不动）：
+ * 契约是「叙述、卡片都可以，裸 JSON 一律不展示」。prompt 允许模型把 JSON
+ * 数组混进正文（它就是卡片的来源），落库内容保留全文（模型历史上下文/重试
+ * 要回看自己的数组），所以气泡这一层把数组剥掉：已闭合的数组段不再渲染
+ * （卡片即该段的可视表达），流式未闭合的尾段也剥（不让半截 JSON 闪出）。
+ * 成文但没成卡的回复（解析失败/归一全弃）原样可见——那是仅存的事实信息。
  */
-const hideNarration = computed<boolean>(() => {
-  const t = textOf.value.trim();
-  if (!t.startsWith("[")) {
-    return false; // 叙述在前/纯叙述 —— 可见
-  }
-  if (hasCards.value) {
-    return isPureFlowJson(t);
-  }
-  return !!props.msg.streaming && jsonLikeSoFar(t);
-});
+const narration = computed<string>(() =>
+  chatNarrationText(props.msg.content, {
+    hasCards: hasCards.value,
+    streaming: !!props.msg.streaming,
+  })
+);
 </script>
 
 <template>
@@ -250,13 +227,13 @@ const hideNarration = computed<boolean>(() => {
           hasCards ? 'w-full md:w-[30rem] md:max-w-[85%]' : 'w-fit max-w-[92%] md:max-w-[80%]',
         ]"
       >
-        <!-- 正文段：卡片到齐且正文整段就是卡片 JSON 时不再渲染裸 JSON（真实叙述照常可见）；
-             流式未定型的 JSON 前缀用待机点兜住 -->
+        <!-- 正文段：裸 JSON 已剥（已成卡数组由卡片表达，叙述留可见）；
+             流式未闭合的 JSON 尾段剥空时走三点待机 -->
         <p
-          v-if="textOf && !hideNarration"
+          v-if="narration"
           class="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-secondary dark:text-ink-onDark"
         >
-          <span>{{ textOf }}</span><span v-if="msg.streaming" class="chat-caret" data-chat-caret="true" aria-hidden="true"></span>
+          <span>{{ narration }}</span><span v-if="msg.streaming" class="chat-caret" data-chat-caret="true" aria-hidden="true"></span>
         </p>
         <!-- 流式开始但内容未到：三点待机 -->
         <div v-else-if="msg.streaming" class="chat-typing" aria-label="生成中">
