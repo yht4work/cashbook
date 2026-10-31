@@ -461,6 +461,7 @@ export const useChatStore = defineStore("chat", {
       if (this.currentId !== null && gone.has(this.currentId)) {
         this.currentId = null;
         this.messages = [];
+        this.draftActive = true; // 真落回草稿态（轮2#4）：面板 remount 的自动选中不得把用户劫进刚清过语境的随机会话
       }
       return deleted;
     },

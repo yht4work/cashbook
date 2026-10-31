@@ -31,7 +31,12 @@ import { chatRetry, type ChatWiring } from "~~/server/utils/chat/sendCore";
 export default defineEventHandler(async (event) => {
   try {
     const cfg = useRuntimeConfig(event);
-    const wiring: ChatWiring = { dataDir: cfg.dataPath || process.cwd(), cfg: { baseUrl: cfg.ollamaBaseUrl, model: cfg.ollamaModel } };
+    // stallMs（轮2#3）：同 send——NUXT_OLLAMA_STALL_MS 可配，≤0/未配回落默认
+    const stallNum = Number(cfg.ollamaStallMs);
+    const wiring: ChatWiring = {
+      dataDir: cfg.dataPath || process.cwd(),
+      cfg: { baseUrl: cfg.ollamaBaseUrl, model: cfg.ollamaModel, stallMs: stallNum > 0 ? stallNum : undefined },
+    };
     return await chatRetry(event, wiring.dataDir, wiring.cfg);
   } catch (err: any) {
     console.error(err);

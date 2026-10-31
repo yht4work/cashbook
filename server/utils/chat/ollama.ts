@@ -13,7 +13,15 @@
  *   的 NDJSON 行）按防御性容忍跳过，不打崩整条流。
  */
 
-export type OllamaCfg = { baseUrl: string; model: string };
+export type OllamaCfg = { baseUrl: string; model: string; stallMs?: number };
+
+/** 挂起阈值归一（轮2#3）：显式参数（测试注入）> cfg.stallMs（运行时可配）> 默认；
+ * ≤0 / 非法一律回落默认——「彻底关掉守卫」不是合法值，真挂起必须有界。 */
+const stallLimit = (cfg: OllamaCfg, explicit: number | undefined): number => {
+  if (explicit !== undefined && explicit > 0) return explicit;
+  if (cfg.stallMs !== undefined && cfg.stallMs > 0) return cfg.stallMs;
+  return READ_STALL_TIMEOUT_MS;
+};
 
 export class OllamaError extends Error {
   constructor(message: string) {
@@ -26,11 +34,14 @@ export class OllamaError extends Error {
 const CONNECT_TIMEOUT_MS = 30_000;
 
 /**
- * 流式/正文读取的「无字间隙」上限（评审轮1#1）：不是总时限——正常生成中
- * chunk 持续到达、每次读都会续期，长正文不被掐；只有模型挂起/连接黑洞
- * （headers 已到但 body 永远不来）才在此超时，中断后前端才能解锁、重试。
+ * 流式/正文读取的「无字间隙」上限（评审轮1#1；轮2#3 放宽+可配置）：不是总
+ * 时限——正常生成中 chunk 持续到达、每次读都会续期，长正文不被掐。注意它
+ * 同时是「首 token 等待上限」：headers 到手后、首个 chunk 出现前 body 是
+ * 完全静默的（模型冷启/prompt 处理不发字节），树莓派 + 云模型的这一段可能
+ * 上百秒——默认 180s，可用 cfg.stallMs（NUXT_OLLAMA_STALL_MS）按机调宽；
+ * 把默认调成「防慢不挡真完成」比收紧更重要，真正挂起依旧有界。
  */
-const READ_STALL_TIMEOUT_MS = 90_000;
+const READ_STALL_TIMEOUT_MS = 180_000;
 
 // 模型偶尔把推理直接吐在正文里（inline 标签或裸叙述），这里对标签自己剥
 // （独立 thinking 字段则按上文整体不读）。标签用拼接写出（7 / 8 字符），
@@ -150,9 +161,10 @@ export const chatStream = async (
   cfg: OllamaCfg,
   messages: unknown[],
   onDelta: (d: string) => void,
-  /** 挂起阈值（测试注入小值；默认 READ_STALL_TIMEOUT_MS） */
-  stallMs: number = READ_STALL_TIMEOUT_MS
+  /** 挂起阈值：显式参数（测试注入）> cfg.stallMs（轮2#3 可配）> 默认 */
+  stallMs?: number
 ): Promise<{ content: string }> => {
+  const limit = stallLimit(cfg, stallMs);
   const { res, abort } = await ollamaRequest(cfg, messages, true);
   const reader = res.body?.getReader();
   if (!reader) {
@@ -189,11 +201,10 @@ export const chatStream = async (
   };
 
   /**
-   * 带挂起守卫的单次读（评审轮1#1）：READ_STALL_TIMEOUT_MS 内一个字都没来
-   * 就 abort 底层连接并抛超时——旧实现 headers 到手后任何一步 read 都无界，
-   * 模型挂起会把整条聊天永久锁死（streaming 卡 true 只能刷新逃生）。
-   * race 落败方的 read 在 abort 后自行 reject，race 本就订阅了双方、
-   * 无 unhandled rejection 挂账。
+   * 带挂起守卫的单次读（评审轮1#1）：阈值内一个字都没来就 abort 底层连接
+   * 并抛超时——旧实现 headers 到手后任何一步 read 都无界，模型挂起会把整
+   * 条聊天永久锁死（streaming 卡 true 只能刷新逃生）。race 落败方的 read
+   * 在 abort 后自行 reject，race 本就订阅了双方、无 unhandled rejection 挂账。
    */
   const readOnce = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -204,7 +215,7 @@ export const chatStream = async (
           timer = setTimeout(() => {
             abort();
             reject(new OllamaError("ollama 流式响应超时"));
-          }, stallMs);
+          }, limit);
         }),
       ]);
     } finally {
@@ -244,12 +255,12 @@ export const chatStream = async (
 /** 非流式单发（会话起标题这类小活）：返回剥净的正文 */
 export const chatOnce = async (cfg: OllamaCfg, prompt: string): Promise<string> => {
   const { res, abort } = await ollamaRequest(cfg, [{ role: "user", content: prompt }], false);
-  // 正文读取同样受挂起守卫保护（评审轮1#1），非流式路径 abort 即断
+  // 正文读取同样受挂起守卫保护（评审轮1#1），阈值经 stallLimit 归一（轮2#3）
   let stalled = false;
   const bodyTimer = setTimeout(() => {
     stalled = true;
     abort();
-  }, READ_STALL_TIMEOUT_MS);
+  }, stallLimit(cfg, undefined));
   let json: { error?: unknown; message?: { content?: unknown } };
   try {
     json = (await res.json()) as typeof json;

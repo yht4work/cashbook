@@ -44,6 +44,10 @@ export default defineEventHandler(async (event) => {
         )
       ),
     ].slice(0, 100);
+    // 空输入提前返回（轮2#7）：不白跑一次全量 Flow 预扫
+    if (ids.length === 0) {
+      return success({ deleted: 0 });
+    }
     const dataPath = String(useRuntimeConfig(event).dataPath || "") || process.cwd();
     // 被引用小票名单预扫一次（评审轮1#6）：旧实现逐会话调 deleteSession 会
     // 重复扫全量 Flow，批量 100 个会话 × 大账户流水就是 100 次全表查

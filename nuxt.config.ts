@@ -104,6 +104,9 @@ export default defineNuxtConfig({
     // ollama（chat 的 AI 中转）：NUXT_OLLAMA_BASE_URL / NUXT_OLLAMA_MODEL 可在 .env 覆盖
     ollamaBaseUrl: "http://localhost:11434",
     ollamaModel: "glm-5.3-flash:cloud",
+    // 流式挂起阈值 ms（轮2#3）：0=内置默认 180s；树莓派+云模型冷启长
+    // prompt 时用 NUXT_OLLAMA_STALL_MS 调大（如 300000）。≤0/未配回落默认
+    ollamaStallMs: 0,
   },
 
   modules: [

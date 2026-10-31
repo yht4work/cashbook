@@ -192,4 +192,25 @@ describe("chatStore.send 请求已发出即返回", () => {
     expect(store.draftActive).toBe(false);
     expect(store.currentId).toBe(11);
   });
+
+  it("当前会话被批量删除 → 落回草稿态（评审轮2#4）：面板 remount 不得劫持进随机会话", async () => {
+    vi.stubGlobal("localStorage", { getItem: () => "1" });
+    h.apiPost.mockResolvedValue({ deleted: 1 });
+    const store = useChatStore();
+
+    await store.loadMessages(7); // 选中既有会话：草稿态退出
+    expect(store.draftActive).toBe(false);
+    expect(store.currentId).toBe(7);
+
+    // 删别人的（非当前）：状态不动
+    await expect(store.batchDeleteSessions([9])).resolves.toBe(1);
+    expect(store.currentId).toBe(7);
+    expect(store.draftActive).toBe(false);
+
+    // 命中当前会话：currentId/messages 清空，且真正置回草稿态
+    await store.batchDeleteSessions([7]);
+    expect(store.currentId).toBeNull();
+    expect(store.messages).toEqual([]);
+    expect(store.draftActive).toBe(true);
+  });
 });

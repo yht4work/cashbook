@@ -414,9 +414,19 @@ const moneyText = computed(() => {
   return Number.isFinite(n) ? n.toLocaleString("zh-CN", { maximumFractionDigits: 2 }) : "0";
 });
 
-const flowLink = computed(() =>
-  cardBooked(props.card) ? `/flows?highlight=${Number(props.card.flowId)}` : ""
-);
+// 查看流水深链（轮1#5；轮2#2）：卡片可能记入与当前账本不同的账本（V1.2 分账
+// 本），flows 页必须拿到卡片的落账本才能真命中——bookId 经查询参数临时切换
+// 查询口径，否则跨账本深链静默退回普通列表。
+const flowLink = computed(() => {
+  if (!cardBooked(props.card)) {
+    return "";
+  }
+  const q = new URLSearchParams({ highlight: String(Number(props.card.flowId)) });
+  if (props.card.bookId) {
+    q.set("bookId", props.card.bookId);
+  }
+  return `/flows?${q.toString()}`;
+});
 </script>
 
 <template>

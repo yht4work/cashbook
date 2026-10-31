@@ -128,7 +128,7 @@ describe("chatStream 正常面", () => {
 describe("chatStream 挂起守卫（评审轮1#1）", () => {
   it("headers 已到但 body 永远不来 → 无字间隙超时抛「ollama 流式响应超时」（abort 撤底层连接）", async () => {
     // 「连上了、头到了、然后黑洞」：fetch 桩返回一个从不 enqueue/从不 close 的
-    // 流（阈值经 stallMs 注入小值——默认 90s 不可等；mini-server 真栈版会被
+    // 流（阈值经 stallMs 注入小值——默认 180s 不可等；mini-server 真栈版会被
     // 半开 socket 拖住 server.close，这里只钉 stall→abort→reject 的本层契约）。
     const res = new Response(new ReadableStream<Uint8Array>({ start() {} }), {
       headers: { "content-type": "application/x-ndjson" },
@@ -140,6 +140,20 @@ describe("chatStream 挂起守卫（评审轮1#1）", () => {
       await expect(p).rejects.toThrow("ollama 流式响应超时");
       // 挂起被掐后 onDelta 永远没得过、正文为空（半途帧不进结果）
       await expect(p).rejects.toThrow(OllamaError);
+    } finally {
+      (globalThis as unknown as { fetch: unknown }).fetch = realFetch;
+    }
+  });
+
+  it("cfg.stallMs 生效（轮2#3 可配置）：不传显式参数也按 cfg 阈值掐", async () => {
+    const res = new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+      headers: { "content-type": "application/x-ndjson" },
+    });
+    const realFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: unknown }).fetch = async () => res;
+    try {
+      const p = chatStream({ baseUrl: "http://127.0.0.1:5", model: MODEL, stallMs: 25 }, MESSAGES, () => {});
+      await expect(p).rejects.toThrow("ollama 流式响应超时");
     } finally {
       (globalThis as unknown as { fetch: unknown }).fetch = realFetch;
     }

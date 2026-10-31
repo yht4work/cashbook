@@ -264,14 +264,6 @@ export const getContext = async (
 ): Promise<ChatContext> => {
   await ownSession(userId, sessionId);
 
-  // 账本归属（评审轮1#2）：入参 bookId 必须在本人名下才可用——distinct 类型
-  // 与最近流水此前只按 bookId 裸查，借 API 传他人 bookId 可把他人候选值与
-  // 最近记录带进 system prompt（经模型回声即跨用户泄露）。共享账本在
-  // inshare.ts 是「加入者 userId 的复制行」，findFirst 天然同覆盖。
-  if (!(await prisma.book.findFirst({ where: { userId, bookId }, select: { id: true } }))) {
-    throw new Error("账本不存在");
-  }
-
   const [rows, industry, pay, attribution, recent, bookRows] = await Promise.all([
     prisma.chatMessage.findMany({
       where: {
@@ -298,6 +290,16 @@ export const getContext = async (
   const books = [
     ...new Map(bookRows.map((b) => [b.bookId, { bookId: b.bookId, bookName: b.bookName }])).values(),
   ].sort((a, b) => a.bookId.localeCompare(b.bookId));
+
+  // 账本归属（评审轮1#2；轮2#6 折叠为 books 成员判定，省一次串行往返）：
+  // 入参 bookId 必须在本人名下才可用——distinct 类型与最近流水只按 bookId
+  // 裸查，借 API 传他人 bookId 会把他人数据带进 system prompt（经模型回声
+  // 即跨用户泄露）。判定卡在 buildSystemPrompt 之前：并行的他人账本查询
+  // 结果即便先落了地，也在这里抛错丢弃、一步都不外发。共享账本在
+  // inshare.ts 是「加入者 userId 的复制行」，findMany(userId) 天然同覆盖。
+  if (!books.some((b) => b.bookId === bookId)) {
+    throw new Error("账本不存在");
+  }
 
   const turns: ChatTurn[] = rows.reverse().map((r) => ({
     role: r.role,
