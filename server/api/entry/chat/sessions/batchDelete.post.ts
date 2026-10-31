@@ -49,18 +49,26 @@ export default defineEventHandler(async (event) => {
       return success({ deleted: 0 });
     }
     const dataPath = String(useRuntimeConfig(event).dataPath || "") || process.cwd();
-    // 被引用小票名单预扫一次（评审轮1#6）：旧实现逐会话调 deleteSession 会
-    // 重复扫全量 Flow，批量 100 个会话 × 大账户流水就是 100 次全表查
-    const referenced = await service.referencedInvoiceNames(userId);
+    // 文件清理收口式（评审轮1#6 优化保留、轮3#1 修 TOCTOU）：各会话先只删库
+    // 并收集小票候选名（deleteSessionCollecting 不扫引用），整批删完后对最新
+    // 的引用名单 fresh 扫一次、统一清——引用扫描必须发生在整批删除之后：
+    // 预扫冻结集（旧实现）看不到批删窗口内并发 saveCard 刚入账的 Flow，会把
+    // 它的小票误判"无引用"而 unlink；收口扫描让竞态窗口归零，且仍只 1 次
+    // 全量 Flow 查询。扫引用之后才可能被并发 saveCard 新增引用吗？此时其
+    // 所属会话已删、saveCard 因「消息不存在」建不了卡——窗口为真零。
+    const candidates: string[] = [];
     let deleted = 0;
     for (const id of ids) {
       // 单个失败（别人的/不存在的 id）只跳过该 id，不中断整批
       try {
-        await service.deleteSession(userId, id, dataPath, referenced);
+        candidates.push(...(await service.deleteSessionCollecting(userId, id, dataPath)));
         deleted += 1;
       } catch (skip) {
         console.warn(`[chat] batchDelete 跳过会话 ${id}`, (skip as Error)?.message ?? skip);
       }
+    }
+    if (candidates.length > 0) {
+      await service.sweepUnreferencedChatImages(dataPath, candidates, await service.referencedInvoiceNames(userId));
     }
     return success({ deleted });
   } catch (err: any) {

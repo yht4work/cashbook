@@ -18,6 +18,7 @@ import {
   appendUserMessage,
   createSession,
   deleteSession,
+  deleteSessionCollecting,
   ensureTitle,
   getContext,
   getMessage,
@@ -26,8 +27,10 @@ import {
   lastMessageId,
   listSessions,
   loadImages,
+  referencedInvoiceNames,
   saveCard,
   saveImages,
+  sweepUnreferencedChatImages,
   SWEEP_EMPTY_AFTER_MS,
   todayOf,
   updateFailedMessage,
@@ -244,6 +247,47 @@ describe("deleteSession", () => {
     } finally {
       await prisma.chatSession.deleteMany({ where: { id: foreign.id } });
     }
+  });
+});
+
+describe("批删收口拼装件（评审轮3#1：收集与引用扫描分离，TOCTOU 归零）", () => {
+  it("deleteSessionCollecting 只删库收候选名、不动文件；sweepUnreferencedChatImages 按传入名单清", async () => {
+    const session = await createSession(UID);
+    const dir = path.join(tmpDir, "images");
+    const imgKept = `chat-${session.id}-300-1-keep.png`;
+    const imgGone = `chat-${session.id}-300-2-drop.png`;
+    await fsp.mkdir(dir, { recursive: true });
+    await Promise.all([imgKept, imgGone].map((n) => fsp.writeFile(path.join(dir, n), Buffer.from(n))));
+    await appendUserMessage(UID, session.id, "两张图", [imgKept, imgGone]);
+
+    const candidates = await deleteSessionCollecting(UID, session.id, tmpDir);
+    expect(candidates.sort()).toEqual([imgKept, imgGone].sort());
+    // 库已删（收集件职责到位），文件原地未动（清理是后续收口的事）
+    expect(await prisma.chatSession.findUnique({ where: { id: session.id } })).toBeNull();
+    expect(fs.existsSync(path.join(dir, imgKept))).toBe(true);
+    expect(fs.existsSync(path.join(dir, imgGone))).toBe(true);
+
+    await mkFlow(BOOK_DEL, { name: "批删窗口内入账", invoice: imgKept });
+    await sweepUnreferencedChatImages(tmpDir, candidates, await referencedInvoiceNames(UID));
+    expect(fs.existsSync(path.join(dir, imgKept))).toBe(true); // 被 Flow.invoice 引用 → 保住
+    expect(fs.existsSync(path.join(dir, imgGone))).toBe(false); // 未引用 → 清掉
+  });
+
+  it("收口时序契约钉死：收集候选 → 之后才入账 → fresh 引用扫描 → 刚入账的凭证保住", async () => {
+    // 复刻 10df807 预扫冻结集丢失凭证的时序：候选收集时尚无此 Flow，收集
+    // 之后 saveCard 入账，收口用的时点扫描必须看到它——旧「预扫一次」在
+    // 这里会 unlink，收口式语义则保住（端点层的批删已按此时序走）
+    const session = await createSession(UID);
+    const dir = path.join(tmpDir, "images");
+    const img = `chat-${session.id}-400-1-late.png`;
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, img), Buffer.from(img));
+    await appendUserMessage(UID, session.id, "带图", [img]);
+
+    const candidates = await deleteSessionCollecting(UID, session.id, tmpDir);
+    await mkFlow(BOOK_DEL, { name: "收口前的迟到入账", invoice: img });
+    await sweepUnreferencedChatImages(tmpDir, candidates, await referencedInvoiceNames(UID));
+    expect(fs.existsSync(path.join(dir, img))).toBe(true);
   });
 });
 

@@ -1,4 +1,4 @@
-import { chatSend, type ChatWiring } from "~~/server/utils/chat/sendCore";
+import { chatSend, failRowOf, type ChatWiring } from "~~/server/utils/chat/sendCore";
 
 /**
  * @swagger
@@ -47,6 +47,6 @@ export default defineEventHandler(async (event) => {
     return await chatSend(event, wiring.dataDir, wiring.cfg);
   } catch (err: any) {
     console.error(err);
-    return error(err?.message ?? String(err));
+    return error(failRowOf(err, "发送失败，请稍后重试")); // 评审轮3#2：壳层 catch 同样不透传原始错误
   }
 });

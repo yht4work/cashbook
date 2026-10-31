@@ -64,9 +64,11 @@ const EMPTY_REPLY_TEXT = "未识别到记账内容，可以直接说金额，例
 /**
  * 失败文案（终审 M2）：气泡里只给短中文，原始系统错误（fs/网络栈）不外露，
  * 原文只进 console 日志。透传两类：OllamaError 的中文文案；本功能自己抛的
- * 中文 Error（如「入账账本不存在」）。其余按 code 分类映射兜底。
+ * 中文 Error（如「入账账本不存在」）。其余按 code 分类映射兜底。导出后
+ * 亦被三个端点壳与 chatSend/chatRetry 的外层 catch 共用（评审轮3#2：非
+ * SSE 响应段同样不许把 fs/DB 原始错误串透传给前端）。
  */
-const failRowOf = (err: unknown): string => {
+export const failRowOf = (err: unknown, fallback = "生成失败，请稍后重试"): string => {
   if (err instanceof OllamaError) {
     const m = (err as Error).message ?? "";
     return m || "生成失败";
@@ -78,13 +80,14 @@ const failRowOf = (err: unknown): string => {
   if (code === "EACCES" || code === "EISDIR" || code === "EMFILE") {
     return "小票文件无法读取，无法生成该消息";
   }
-  const raw = String((err as Error)?.message ?? err ?? "");
-  // 中文开头的 message 视为本功能的用户文案（直接透传）；英文开头的原始
-  // 系统错误一律兜底，不给用户看栈内容
+  const raw = typeof (err as Error)?.message === "string" ? String((err as Error).message) : "";
+  // message 为非字符串（缺字段/杂件）不计透传；中文开头的 message 视为
+  // 本功能的用户文案（直接透传）；英文开头的原始系统错误一律兜底，
+  // 不给用户看栈内容
   if (raw && !/^[A-Za-z]/.test(raw)) {
     return raw;
   }
-  return "生成失败，请稍后重试";
+  return fallback;
 };
 
 /**
@@ -231,7 +234,9 @@ export const chatSend = async (event: H3Event, dataDir: string, cfg: OllamaCfg) 
     await runTurn(event, { userId, sessionId, bookId, dataDir, cfg, mode: "send", userImages: images, userText: text });
   } catch (err: any) {
     console.error(err);
-    return error(err?.message ?? String(err));
+    // 评审轮3#2：SSE 段外的失败（存图/落 user 行/表单解析等）同样走脱敏
+    //——原始 fs/DB 错误串（含绝对路径）不许进给端响应（文案按所在动作给）
+    return error(failRowOf(err, "发送失败，请稍后重试"));
   }
 };
 
@@ -260,7 +265,7 @@ export const chatRetry = async (event: H3Event, dataDir: string, cfg: OllamaCfg)
     await runTurn(event, { userId, sessionId, bookId, dataDir, cfg, mode: "retry", retryId: messageId });
   } catch (err: any) {
     console.error(err);
-    return error(err?.message ?? String(err));
+    return error(failRowOf(err, "重试失败，请稍后重试")); // 评审轮3#2：同 chatSend——外层 catch 一律脱敏
   }
 };
 
@@ -295,6 +300,6 @@ export const chatSave = async (form: FormData, userId: number) => {
     ));
   } catch (err: any) {
     console.error(err);
-    return error(err?.message ?? String(err));
+    return error(failRowOf(err, "入账失败，请稍后重试")); // 评审轮3#2：saveCard 的 ts/prisma 原始错误同样不外露
   }
 };

@@ -319,7 +319,11 @@ export const chatBookList = async (): Promise<Array<{ bookId: string; bookName: 
         .map((b) => ({ bookId: String(b.bookId), bookName: String(b.bookName ?? "") })),
     };
   } catch {
-    // toast 已提示；空列表 → 下拉回退当前账本、徽标不显示
+    // toast 已提示；失败按契约返回空数组（下拉回退当前账本、徽标不显示）。
+    // 陈旧缓存一并失效（评审轮3#3）——否则返回值带着旧账本列表，已删/已
+    // 改名的账本会在下拉与「记入」徽标里继续展示（服务端虽仍校验保数据，
+    // UI 照旧失真）
+    chatBookListCache = null;
   }
   return chatBookListCache?.rows ?? [];
 };

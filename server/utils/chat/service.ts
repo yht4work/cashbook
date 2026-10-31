@@ -89,7 +89,7 @@ export const createSession = async (userId: number): Promise<{ id: number }> => 
 };
 
 /** 该用户全部流水的被引用小票名集合（会话清理的文件保护名单）；
- *  deleteSession 自扫，batchDelete 预扫一次复用（评审轮1#6） */
+ *  deleteSession 单删自扫、batchDelete 收口后统一扫（评审轮3#1） */
 export const referencedInvoiceNames = async (userId: number): Promise<Set<string>> => {
   const flows = await prisma.flow.findMany({
     where: { userId, invoice: { not: null } },
@@ -98,13 +98,17 @@ export const referencedInvoiceNames = async (userId: number): Promise<Set<string
   return new Set(flows.map((f) => f.invoice ?? "").flatMap((v) => v.split(",")));
 };
 
-export const deleteSession = async (
+/**
+ * 删会话+消息并返回待清理的小票候选名（不做文件清理/不扫引用）。
+ * batchDelete 的拼装件：整批逐会话收集，全部删完后 fresh 扫一次引用再
+ * 统一清（见 sweepUnreferencedChatImages）——候选名必须在删消息前取出
+ *（消息没了就查不到了），但文件清理必须等删除提交、且引用扫描必须新鲜。
+ */
+export const deleteSessionCollecting = async (
   userId: number,
   sessionId: number,
-  dataDir: string,
-  /** 预扫描的被引用小票名（batchDelete 复用一次扫描；不传则自扫） */
-  referencedNames?: Set<string>
-): Promise<void> => {
+  dataDir: string
+): Promise<string[]> => {
   const session = await ownSession(userId, sessionId);
 
   // 要清理的文件名得在删消息前取出来（消息没了就查不到了）
@@ -118,15 +122,22 @@ export const deleteSession = async (
 
   await prisma.chatMessage.deleteMany({ where: { sessionId: session.id, userId } });
   await prisma.chatSession.deleteMany({ where: { id: session.id, userId } }); // FK RESTRICT：消息已先删
+  return candidates;
+};
 
-  // 只删未被该用户任一 Flow.invoice 引用的：invoice 按逗号拆开做精确匹配
-  //（不能 contains——chat-1-1.png 是 chat-1-11.png 的子串）。
-  // referencedNames（评审轮1#6）：batchDelete 预扫一次传入，循环里不再每
-  // 会话重扫全量 Flow；单删路径不传，仍自扫（一次 findMany）。
-  const referenced = referencedNames ?? (await referencedInvoiceNames(userId));
-
-  // 删除（DB）已提交；文件清理是收尾活，失败绝不能让本该成功的删除反着报错
-  //（ENOENT 直接忽略，其余记日志吞掉——残留文件的损失小于删除请求 500）
+/**
+ * 统一收口清理：只删未被该用户任一 Flow.invoice 引用的候选文件。invoice
+ * 按逗号拆开做精确匹配（不能 contains——chat-1-1.png 是 chat-1-11.png 的
+ * 子串）。调用时刻的引用扫描必须新鲜：删除与扫描间并发 saveCard 入账的
+ * 流水其小票必须保住（评审轮3#1：预扫冻结集会错删批删窗口内刚入账的图）。
+ * 文件清理是收尾活，失败绝不能让本该成功的删除反着报错（ENOENT 直接
+ * 忽略，其余记日志吞掉——残留文件的损失小于删除请求 500）。
+ */
+export const sweepUnreferencedChatImages = async (
+  dataDir: string,
+  candidates: string[],
+  referenced: Set<string>
+): Promise<void> => {
   for (const n of candidates) {
     if (referenced.has(n)) {
       continue;
@@ -135,10 +146,18 @@ export const deleteSession = async (
       await fs.unlink(path.join(imagesDir(dataDir), n));
     } catch (e) {
       if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") {
-        console.error(`[chat] 会话 ${sessionId} 的小票 ${n} 清理失败`, e);
+        console.error(`[chat] 小票 ${n} 清理失败`, e);
       }
     }
   }
+};
+
+export const deleteSession = async (userId: number, sessionId: number, dataDir: string): Promise<void> => {
+  const candidates = await deleteSessionCollecting(userId, sessionId, dataDir);
+  // 扫引用在消息删除之后（评审轮3#1）：单删路径并发 saveCard 要么先持锁
+  // 提交（此处 fresh 扫能看到它的 Flow），要么因消息行已删而建不了卡——
+  // 两个次序都保得住文件；batchDelete 禁止把预扫冻结集传进来
+  await sweepUnreferencedChatImages(dataDir, candidates, await referencedInvoiceNames(userId));
 };
 
 // ==================== 消息 ====================

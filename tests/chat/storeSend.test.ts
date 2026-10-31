@@ -12,7 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { useChatStore } from "~/utils/chatStore";
+import { chatBookList, resetChatClientCache, useChatStore } from "~/utils/chatStore";
 import { doApi } from "~/utils/api";
 import { Alert } from "~/utils/alert";
 
@@ -212,5 +212,29 @@ describe("chatStore.send 请求已发出即返回", () => {
     expect(store.currentId).toBeNull();
     expect(store.messages).toEqual([]);
     expect(store.draftActive).toBe(true);
+  });
+
+  it("chatBookList：60s 内吃缓存不重拉；陈旧后拉取失败 → 返回空数组且缓存失效（评审轮3#3）", async () => {
+    resetChatClientCache();
+    h.apiPost.mockImplementation(async (p: string) =>
+      String(p).includes("book/list") ? [{ bookId: "b1", bookName: "书1" }] : { id: 11 }
+    );
+
+    expect(await chatBookList()).toEqual([{ bookId: "b1", bookName: "书1" }]);
+    h.apiPost.mockClear();
+    expect(await chatBookList()).toEqual([{ bookId: "b1", bookName: "书1" }]);
+    expect(h.apiPost).not.toHaveBeenCalled(); // fresh 缓存：不打接口
+
+    // 缓存陈旧化（>60s）+ 拉取失败：契约「失败返回空数组」——不再吐陈旧列表，
+    // 且缓存一并失效（下一次调用重新拉取）
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000);
+    h.apiPost.mockImplementation(async () => {
+      throw new Error("network down");
+    });
+    try {
+      expect(await chatBookList()).toEqual([]);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });
