@@ -7,6 +7,7 @@ import {
 } from "~/utils/flag";
 import { useSystemStore } from "~/utils/store";
 import { getUserInfo, doApi } from "~/utils/api";
+import { useChatStore, resetChatClientCache } from "~/utils/chatStore";
 
 // Responsive state
 const isMobile = ref(false);
@@ -83,6 +84,10 @@ const logout = () => {
   pageLoading.value = true;
   localStorage.removeItem("bookId");
   localStorage.removeItem("bookName");
+  // chat 会话数据按用户隔离（评审轮1#8）：登出时清 blob 缓存与 store 里的
+  // 会话/消息，换账号不再看到前任登录的会话内容与图片
+  resetChatClientCache();
+  useChatStore().$reset();
   doApi.get("api/logout").then(() => {
     Alert.success("退出登录");
     setTimeout(() => {
@@ -158,7 +163,14 @@ const checkVersion = () => {
     />
   </Head>
 
-  <div class="h-screen p-0 m-0 overflow-hidden">
+  <!-- 根高度用 dvh（双声明兜底）：h-screen 的 100vh 在 iOS Safari 是「工具栏全收起
+       的大视口」高度，比底部 URL 栏展开时的可视区高约 100px，文档比屏幕高 → 整页
+       可滚，上滑会把 Header/聊天顶栏顶出屏（fixed 底栏却不动）。dvh 始终等于当前
+       可视高度，文档=视口后整页无滚动量，滚动只发生在消息流内部。 -->
+  <div
+    class="p-0 m-0 overflow-hidden"
+    style="height: 100vh; height: 100dvh;"
+  >
     <!-- Header -->
     <LayoutAppHeader
       :book-name="bookName"
@@ -173,7 +185,7 @@ const checkVersion = () => {
 
     <div
       class="flex relative"
-      style="height: calc(100vh - 64px)"
+      style="height: calc(100vh - 64px); height: calc(100dvh - 64px);"
       :class="{ 'pb-12': isMobile }"
     >
       <!-- Sidebar - Desktop -->

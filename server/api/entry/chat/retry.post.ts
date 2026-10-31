@@ -1,0 +1,45 @@
+import { chatRetry, failRowOf, type ChatWiring } from "~~/server/utils/chat/sendCore";
+
+/**
+ * @swagger
+ * /api/entry/chat/retry:
+ *   post:
+ *     summary: 重试失败消息（流式）
+ *     tags: ["Chat"]
+ *     security:
+ *       - Authorization: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               messageId:
+ *                 type: number
+ *                 description: 失败的 assistant 消息ID（status=-1）
+ *               sessionId:
+ *                 type: number
+ *                 description: 该消息所属会话ID
+ *               bookId:
+ *                 type: string
+ *                 description: 当前账本ID
+ *     responses:
+ *       200:
+ *         description: SSE 流（text/event-stream），契约同 /chat/send；不重传图、不重复 user 消息，成功后更新失败行（done 帧即该行 id）
+ */
+export default defineEventHandler(async (event) => {
+  try {
+    const cfg = useRuntimeConfig(event);
+    // stallMs（轮2#3）：同 send——NUXT_OLLAMA_STALL_MS 可配，≤0/未配回落默认
+    const stallNum = Number(cfg.ollamaStallMs);
+    const wiring: ChatWiring = {
+      dataDir: cfg.dataPath || process.cwd(),
+      cfg: { baseUrl: cfg.ollamaBaseUrl, model: cfg.ollamaModel, stallMs: stallNum > 0 ? stallNum : undefined },
+    };
+    return await chatRetry(event, wiring.dataDir, wiring.cfg);
+  } catch (err: any) {
+    console.error(err);
+    return error(failRowOf(err, "重试失败，请稍后重试")); // 评审轮3#2：壳层 catch 同样不透传原始错误
+  }
+});

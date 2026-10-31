@@ -102,7 +102,9 @@
             v-else
             v-for="item in flows"
             :key="item.id"
+            :data-flow-id="item.id"
             class="hover:bg-surface-soft dark:hover:bg-surface-darkMuted transition-colors"
+            :class="highlightOf(item.id) ? 'ring-2 ring-inset ring-brand-400 dark:ring-brand-500' : ''"
           >
             <td class="px-2 py-1 whitespace-nowrap">
               <input
@@ -243,7 +245,9 @@
         <div
           v-for="item in flows"
           :key="item.id"
+          :data-flow-id="item.id"
           class="bg-surface-soft dark:bg-surface-darkMuted px-2 py-2 space-y-1 border-b border-frame-light dark:border-frame-dark last:border-b-0"
+          :class="highlightOf(item.id) ? 'ring-2 ring-inset ring-brand-400 dark:ring-brand-500' : ''"
         >
           <!-- 顶部：复选框、日期和删除按钮 -->
           <div class="flex justify-between items-start">
@@ -513,9 +517,15 @@ interface Props {
   totalPages: number;
   pageNumbers: (number | string)[];
   loading?: boolean;
+  /** 深链高亮（评审轮1#5）：/flows?highlight=<id> 命中的行短暂圈亮 */
+  highlightId?: number | null;
 }
 
 const props = defineProps<Props>();
+
+/** 桌面行/移动卡共的高亮类：ring 内描边，不与 hover 背景抢色 */
+const highlightOf = (id: string | number): boolean =>
+  props.highlightId !== null && props.highlightId !== undefined && Number(id) === props.highlightId;
 
 // 生成移动端友好的页码
 const mobileFriendlyPageNumbers = computed(() => {

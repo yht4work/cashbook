@@ -1,0 +1,783 @@
+<script setup lang="ts">
+import { computed, ref, watch } from "vue";
+/* ⚠ 显式 import（Nuxt dev 自动导入不收编新组件——本组件自身的依赖与被
+ * ChatMsgItem 引用一样，都要写全）：UiDatePicker、doApi、候选 API、store。 */
+import { CheckBadgeIcon, PencilSquareIcon } from "@heroicons/vue/24/solid";
+import { TagIcon } from "@heroicons/vue/24/outline";
+import { Alert } from "~/utils/alert";
+import { doApi } from "~/utils/api";
+import { getIndustryType, getPayType } from "~/utils/apis";
+import { cardBooked, chatBookList, chatImageBlob, useChatStore, type DraftFlow } from "~/utils/chatStore";
+import UiDatePicker from "~/components/ui/DatePicker.vue";
+import ChatImageViewer from "~/components/chat/ChatImageViewer.vue";
+
+/**
+ * 流水草稿确认卡（Task 9）：AI 产出的一条 DraftFlow → 概览 → 编辑 → 入账。
+ *
+ * - 概览态：徽标（已入账=绿角标 + 「查看流水」链接 /flows?highlight=<flowId>；
+ *   未入账=灰「待确认」）+ 字段摘要（卡带 bookId 时附「记入 账本名」）+ 小票
+ *   缩略图；未入账有「编辑」（进表单）与「入账」（直接入账）。
+ * - 编辑态：day 用 UiDatePicker（显式 import）；flowType 下拉（FlowEditDialog
+ *   同口：支出/收入/不计收支，可留空）；industryType/payType/attribution 是
+ *   「候选下拉 + 自由文本」组合框——候选一律来自当前账本（localStorage.bookId 的
+ *   实际取值：getIndustryType/getPayType/getAttributions，flowType 变则重拉）；
+ *   money 数字输入；name/description 文本；账本下拉来自 chatBookList（60s 缓存），
+ *   默认卡片的 bookId（AI 按账本名归一映射的落账本）、没带则当前账本——入账以
+ *   最终选择为准（V1.2：一部分卡片走医保、一部分走现金，从选账本开始）。
+ * - 小票勾选：缩略图带勾选态，点击 = card.invoices 增删（仅未入账可改）；
+ *   图挂了留「加载失败」占位仍可取消勾选，不让死文件悄悄留在卡上。
+ * - 入账：规范化（day 缺省/非法补今天、money 与服务端 moneyOf 同口径、名称
+ *   兜底「未命名流水」）→ store.saveCard(messageId, index, card, bookId)，其中
+ *   bookId=表单最终选择 → 卡片预填（card.bookId）→ 当前账本 三级回退；
+ *   成功后 store 把 flowId/bookId 与本次编辑值合并回卡片，卡片转只读。
+ * - 已入卡锁定：不渲染编辑/入账/勾选控件；再入账服务端也以「该卡片已入账」拒绝。
+ *
+ * 编辑开关由卡片自持（评审轮1#9：旧 editing prop 从未被父级传入，是死接口）。
+ */
+interface Props {
+  card: DraftFlow;
+  index: number;
+  messageId: number;
+  /** 本消息行仍在流式生成（行 id 未固化=0：入账必被「卡片数据无效」拒，
+   *  编辑会在 done 后的重挂中丢）——此时卡片动作整体禁用 */
+  streaming?: boolean;
+  /** 勾选池上下文：本消息各卡的小票 + 源 user 行的图（可给本卡补挂/取消） */
+  ctxInvoices?: string[];
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  streaming: false,
+  ctxInvoices: () => [],
+});
+
+const store = useChatStore();
+
+// ---------- 派生状态 ----------
+
+const booked = computed(() => cardBooked(props.card));
+
+/** 编辑开关（卡片自持；概览态「编辑」钮进入，收起/入账成功退出） */
+const editing = ref(false);
+
+/** 草稿（表单数据源；进编辑态从 card 拷贝，取消/收起则丢弃） */
+const draft = ref<DraftFlow>({
+  ...props.card,
+  invoices: [...props.card.invoices],
+});
+
+/** 父级替换 card 对齐状态：已入则收起编辑并对齐（回写 flowId）；未入则只在未编辑时对齐 */
+watch(
+  () => props.card,
+  (c) => {
+    if (booked.value) {
+      editing.value = false;
+      draft.value = { ...c, invoices: [...c.invoices] };
+      return;
+    }
+    if (editing.value) {
+      // 编辑中的未入账卡：行对象重建（如本会话另一轮 send 收尾的 loadMessages 会
+      // 重建全部行、换成新的 card 对象，内容还是入账前原值）——不回灌，保住用户
+      // 未提交的编辑，否则刷新会静默回退编辑、接着入账会把回退值记进去。
+      return;
+    }
+    draft.value = { ...c, invoices: [...c.invoices] };
+  }
+);
+
+// ---------- 小票图（blob 直显）与勾选（编辑态） ----------
+
+/**
+ * show 接口要求裸 Authorization 头，<img> 带不上 —— 缩略/勾选一律走
+ * chatImageBlob（doApi.download → blob → objectURL，参照 FlowEditInvoiceDialog）：
+ * 名称 → 已就绪的 blob URL / 未就绪（占位）/ 失败（占位，仍可操作勾选）。
+ */
+const thumbs = ref<Record<string, string>>({});
+const loadFailed = ref<string[]>([]);
+
+const thumbOf = (name: string): string => thumbs.value[name] ?? "";
+
+const loadOne = (name: string): void => {
+  if (thumbs.value[name] || loadFailed.value.includes(name)) {
+    return;
+  }
+  chatImageBlob(name).then((url) => {
+    if (url && !thumbs.value[name]) {
+      thumbs.value[name] = url;
+    } else if (!url && !loadFailed.value.includes(name)) {
+      loadFailed.value.push(name);
+    }
+  });
+};
+
+/**
+ * 编辑态可勾选的小票全集（reactive 计算值）：卡上现有 + ctxInvoices（本消息
+ * 其他卡的小票与源 user 行的图）——勾掉的文件仍留在 draft.invoices，不会从
+ * 池里消失；别的卡/源消息的小票也可给本卡补挂（spec：入账前用户可增删小票，
+ * AI 常把票只挂到部分卡上，两个方向都要能给）。
+ */
+const pool = computed<string[]>(() => {
+  const set = new Set<string>();
+  for (const n of props.ctxInvoices) {
+    if (n) {
+      set.add(String(n));
+    }
+  }
+  for (const n of draft.value.invoices) {
+    if (n) {
+      set.add(String(n));
+    }
+  }
+  return [...set];
+});
+
+// 池内缩略按需装载（失败的进 loadFailed 占位；null 不入缓存，重开编辑会重试）
+watch(
+  pool,
+  (names) => {
+    for (const n of names) {
+      loadOne(n);
+    }
+  },
+  { immediate: true }
+);
+
+// 概览缩略（含已入卡回显的入账小票）随 card.invoices 变化装载
+watch(
+  () => props.card.invoices.join("|"),
+  (v, old) => {
+    if (v !== old) {
+      for (const n of props.card.invoices) {
+        loadOne(n);
+      }
+    }
+  },
+  { immediate: true }
+);
+
+const invoiceOn = (name: string): boolean => draft.value.invoices.includes(name);
+
+/** 勾选/取消 = card.invoices 增删（写回 draft，入账时随卡片提交） */
+const toggleInvoice = (name: string): void => {
+  const next = new Set(draft.value.invoices);
+  if (invoiceOn(name)) {
+    next.delete(name);
+  } else {
+    next.add(name);
+  }
+  draft.value.invoices = [...next];
+};
+
+const markFailed = (name: string): void => {
+  if (!loadFailed.value.includes(name)) {
+    loadFailed.value.push(name);
+  }
+};
+
+// ---------- 类型候选（FlowEditDialog 同法：候选下拉 + 自由文本，留空允许） ----------
+
+const flowTypeOptions = ["支出", "收入", "不计收支"];
+
+const industryTypeLabel = computed(() => {
+  const t = draft.value.flowType;
+  if (t === "支出") {
+    return "支出类型";
+  }
+  if (t === "收入") {
+    return "收入类型";
+  }
+  return "支出类型/收入类型";
+});
+
+const payTypeLabel = computed(() => {
+  const t = draft.value.flowType;
+  if (t === "支出") {
+    return "支付方式";
+  }
+  if (t === "收入") {
+    return "收款方式";
+  }
+  return "支付方式/收款方式";
+});
+
+const industryOptions = ref<string[]>([]);
+const payOptions = ref<string[]>([]);
+const attributionOptions = ref<string[]>([]);
+
+/** getIndustryType/getPayType 返回 {industryType|payType} 行，这里拉平为字符串数组 */
+const loadIndustry = async (): Promise<void> => {
+  try {
+    const rows = await getIndustryType(draft.value.flowType || "");
+    industryOptions.value = (rows || []).map((r) => String(r?.industryType ?? "")).filter(Boolean);
+  } catch {
+    // 失败保旧候选（toast 已提示）
+  }
+};
+const loadPay = async (): Promise<void> => {
+  try {
+    const rows = await getPayType(draft.value.flowType || "");
+    payOptions.value = (rows || []).map((r) => String(r?.payType ?? "")).filter(Boolean);
+  } catch {
+    // 失败保旧候选（toast 已提示）
+  }
+};
+const loadAttribution = async (): Promise<void> => {
+  try {
+    const res = await doApi.post<string[]>("api/entry/flow/getAttributions", {
+      bookId: localStorage.getItem("bookId"),
+    });
+    attributionOptions.value = res || [];
+  } catch {
+    // 失败保旧候选（toast 已提示）
+  }
+};
+
+/** 流水类型切换 → industry/pay 候选按类型重拉（FlowEditDialog 的 changeFlowTypes 同法） */
+const onFlowTypeChange = (): void => {
+  loadIndustry();
+  loadPay();
+};
+
+// ---------- 组合框：候选过滤下拉（mousedown 选中，避免 blur 抢先关掉） ----------
+
+const openCand = ref<"" | "industry" | "pay" | "attribution">("");
+
+const candItems = computed<string[]>(() => {
+  const f = openCand.value;
+  if (!f || !editing.value) {
+    return [];
+  }
+  const opts =
+    f === "industry"
+      ? industryOptions.value
+      : f === "pay"
+        ? payOptions.value
+        : attributionOptions.value;
+  const text = String(
+    draft.value[f === "industry" ? "industryType" : f === "pay" ? "payType" : "attribution"] ?? ""
+  ).trim();
+  if (!text) {
+    return opts; // 空文本给全量候选
+  }
+  return opts.filter((o) => o.toLowerCase().includes(text.toLowerCase()));
+});
+
+const setCandField = (f: "" | "industry" | "pay" | "attribution"): void => {
+  openCand.value = f;
+};
+
+const pickCand = (f: "industry" | "pay" | "attribution", v: string): void => {
+  if (f === "industry") {
+    draft.value.industryType = v;
+  } else if (f === "pay") {
+    draft.value.payType = v;
+  } else {
+    draft.value.attribution = v;
+  }
+  openCand.value = "";
+};
+
+// ---------- 账本选择（入账以最终选择为准） ----------
+
+const books = ref<Array<{ bookId: string; bookName: string }>>([]);
+const selectedBook = ref("");
+
+/** chatBookList 自带 60s 缓存：多条卡同时挂载只打一次接口 */
+const loadBooks = async (): Promise<void> => {
+  const rows = await chatBookList();
+  // 失败返回空列表：下拉仍显示当前账本（chatBookList 内部已 toast）
+  if (!rows.length && books.value.length) {
+    return; // 保旧名单，不清空已装载的下拉
+  }
+  books.value = rows;
+  const cur = localStorage.getItem("bookId") || "";
+  // 当前账本不在列表（已被删等边缘）：前面补一条占位项，避免表单悄悄丢选择
+  if (cur && !books.value.some((b) => b.bookId === cur)) {
+    books.value = [{ bookId: cur, bookName: `${cur}（当前账本）` }, ...books.value];
+  }
+  if (!selectedBook.value) {
+    // 预选：卡片带的 bookId（AI 归一映射的落账本）优先，没带回当前账本
+    const sug = props.card.bookId || "";
+    selectedBook.value = sug && books.value.some((b) => b.bookId === sug) ? sug : cur;
+  }
+};
+
+/** 概览「记入」徽标的账本名（bookId → 名字；名单未就绪时先空着不显示） */
+const overviewBookName = computed(
+  () => books.value.find((b) => b.bookId === props.card.bookId)?.bookName ?? ""
+);
+
+// 卡带 bookId（AI 拆账本/已入账回写）而名单还没就绪 → 拉一次概览徽标用的名单
+watch(
+  () => [Boolean(props.card.bookId), books.value.length] as const,
+  ([hasBook, loaded]) => {
+    if (hasBook && !loaded) {
+      void loadBooks();
+    }
+  },
+  { immediate: true }
+);
+
+// ---------- 入账 ----------
+
+const saving = ref(false);
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** 上海时区的今天：与服务端 todayOf 同口径（day 缺省兜底用） */
+const todayOf = (): string =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
+
+/** day 兜底：非法/缺省 → 今天（与 normalizeFlows 的 dayFallback 同口径，别把空串写进流水） */
+const dayOf = (v: string): string => {
+  const s = String(v ?? "").trim();
+  if (s && DAY_RE.test(s) && !Number.isNaN(Date.parse(s))) {
+    return s;
+  }
+  return todayOf();
+};
+
+/** money 同服务端 moneyOf：非数字/负数 → 0 */
+const moneyOf = (v: unknown): number => {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+};
+
+/** 编辑值 → 入账载荷（键集与 DraftFlow 同构；bookId 走独立参数，不混进卡片） */
+const payload = (): DraftFlow => ({
+  day: dayOf(draft.value.day),
+  flowType: String(draft.value.flowType ?? "").trim(),
+  industryType: String(draft.value.industryType ?? "").trim(),
+  payType: String(draft.value.payType ?? "").trim(),
+  money: moneyOf(draft.value.money),
+  name: String(draft.value.name ?? "").trim() || "未命名流水",
+  description: String(draft.value.description ?? "").trim(),
+  attribution: String(draft.value.attribution ?? "").trim(),
+  invoices: [...new Set(draft.value.invoices.map(String).filter(Boolean))],
+});
+
+const onBook = async (): Promise<void> => {
+  if (booked.value || saving.value || props.streaming) {
+    return; // 已入卡/进行中/流式中（行 id 未固化必被拒）不再发请求（服务端同样以「该卡片已入账」闭环）
+  }
+  // 入账目标账本 = 卡片上最终选择 → 卡片预填（card.bookId，AI 拆账本的落点）
+  // → 当前账本 三级回退（概览直接入账时 selectedBook 还没选过）
+  const book = selectedBook.value || props.card.bookId || localStorage.getItem("bookId") || "";
+  if (!book) {
+    Alert.error("请先选择账本");
+    return;
+  }
+  saving.value = true;
+  try {
+    const flowId = await store.saveCard(props.messageId, props.index, payload(), book);
+    editing.value = false;
+    if (flowId) {
+      Alert.success(`已入账（流水 #${flowId}）`);
+    }
+  } catch {
+    // toast 已提示（卡片数据无效/请先选择账本/服务端拒绝）
+  } finally {
+    saving.value = false;
+  }
+};
+
+const openEdit = (): void => {
+  if (booked.value || props.streaming) {
+    return; // 已入卡锁定；流式中（行 id 未固化）也不可编辑——done 后会重挂丢编辑
+  }
+  draft.value = { ...props.card, invoices: [...props.card.invoices] };
+  editing.value = true;
+  // 预选：编辑过保留上次选择 → 卡片预填 → 当前账本
+  selectedBook.value = selectedBook.value || props.card.bookId || localStorage.getItem("bookId") || "";
+  loadCandidates();
+  loadBooks();
+};
+
+const cancelEdit = (): void => {
+  draft.value = { ...props.card, invoices: [...props.card.invoices] };
+  editing.value = false;
+  // 收起=取消编辑：本次选过的账本一并作废（否则之后概览里直接入账会吃进已放弃的选择）
+  selectedBook.value = "";
+};
+
+/** 概览缩略的大图蒙版（V1.2 反馈：不再 blob: 新标签页） */
+const viewerSrc = ref("");
+
+const loadCandidates = (): void => {
+  loadIndustry();
+  loadPay();
+  loadAttribution();
+};
+
+// ---------- 概览摘要 ----------
+
+const moneyText = computed(() => {
+  const n = Number(props.card.money);
+  return Number.isFinite(n) ? n.toLocaleString("zh-CN", { maximumFractionDigits: 2 }) : "0";
+});
+
+// 查看流水深链（轮1#5；轮2#2）：卡片可能记入与当前账本不同的账本（V1.2 分账
+// 本），flows 页必须拿到卡片的落账本才能真命中——bookId 经查询参数临时切换
+// 查询口径，否则跨账本深链静默退回普通列表。
+const flowLink = computed(() => {
+  if (!cardBooked(props.card)) {
+    return "";
+  }
+  const q = new URLSearchParams({ highlight: String(Number(props.card.flowId)) });
+  if (props.card.bookId) {
+    q.set("bookId", props.card.bookId);
+  }
+  return `/flows?${q.toString()}`;
+});
+</script>
+
+<template>
+  <div
+    class="w-full min-w-0 rounded-xl border border-frame bg-surface-soft p-3 shadow-sm dark:border-frame-dark dark:bg-surface-dark"
+    data-chat-card
+    :data-chat-card-index="index"
+    :data-chat-card-booked="booked ? 'true' : 'false'"
+  >
+    <!-- 概览头：徽标 + 名称 + 金额 -->
+    <div class="flex items-center gap-2">
+      <span
+        data-chat-card-badge
+        class="inline-flex flex-shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium"
+        :class="
+          booked
+            ? 'bg-brand-100 text-brand-700 dark:bg-brand-700 dark:text-brand-100'
+            : 'bg-surface-muted text-ink-muted dark:bg-surface-darkMuted dark:text-ink-muted'
+        "
+      >
+        <CheckBadgeIcon v-if="booked" class="h-3.5 w-3.5" />
+        {{ booked ? "已入账" : "待确认" }}
+      </span>
+      <span
+        class="min-w-0 flex-1 truncate text-sm font-semibold text-ink-primary dark:text-ink-onDark"
+        :title="card.name || '未命名流水'"
+      >
+        {{ card.name || "未命名流水" }}
+      </span>
+      <span
+        class="flex-shrink-0 text-sm font-semibold"
+        :class="card.flowType === '收入' ? 'text-brand-600 dark:text-brand-300' : 'text-ink-secondary dark:text-ink-onDark'"
+      >
+        ¥{{ moneyText }}
+      </span>
+    </div>
+
+    <!-- 概览摘要行 -->
+    <div class="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-ink-muted">
+      <span data-chat-card-day>{{ card.day }}</span>
+      <span v-if="card.flowType" data-chat-card-flow-type>{{ card.flowType }}</span>
+      <span v-if="card.industryType" data-chat-card-industry>{{ card.industryType }}</span>
+      <span v-if="card.payType" data-chat-card-pay-type>{{ card.payType }}</span>
+      <span v-if="card.attribution" data-chat-card-attribution>{{ card.attribution }}</span>
+      <span
+        v-if="overviewBookName"
+        data-chat-card-book
+        class="rounded bg-surface-muted px-1.5 py-0.5 font-medium dark:bg-surface-darkMuted"
+      >
+        记入 {{ overviewBookName }}
+      </span>
+      <span data-chat-card-invoice-count>小票 {{ card.invoices.length }} 张</span>
+    </div>
+    <p
+      v-if="card.description"
+      class="mt-1 truncate text-xs leading-relaxed text-ink-muted"
+      :title="card.description"
+    >
+      {{ card.description }}
+    </p>
+
+    <!-- 概览小票缩略（blob 直显；点击开页内大图蒙版；已入卡展示的就是入账时挂在流水上的小票） -->
+    <div v-if="!editing && card.invoices.length" class="mt-2 flex flex-wrap gap-1.5" data-chat-card-thumb-list="true">
+      <template v-for="n in card.invoices" :key="n">
+        <button
+          v-if="thumbOf(n)"
+          type="button"
+          data-chat-card-thumb
+          class="block h-14 w-14 overflow-hidden rounded-md border border-frame bg-surface dark:border-frame-dark dark:bg-surface-darkMuted"
+          :title="`${n}（查看大图）`"
+          :aria-label="`查看小票大图：${n}`"
+          @click="viewerSrc = thumbOf(n)"
+        >
+          <img
+            :src="thumbOf(n)"
+            alt="小票"
+            class="h-full w-full object-cover"
+            loading="lazy"
+            @error="markFailed(n)"
+          />
+        </button>
+        <span
+          v-else
+          class="flex h-14 w-14 items-center justify-center rounded-md border border-frame bg-surface-muted text-center text-[10px] leading-tight text-ink-muted dark:border-frame-dark dark:bg-surface-darkMuted"
+          :title="n"
+        >
+          {{ loadFailed.includes(n) ? "加载失败" : "小票" }}
+        </span>
+      </template>
+    </div>
+
+    <!-- 编辑表单 -->
+    <div v-if="editing" class="mt-3 space-y-2" data-chat-card-form="true">
+      <!-- 日期（UiDatePicker 显式 import） -->
+      <div>
+        <label class="mb-1 block text-xs font-semibold text-ink-secondary dark:text-ink-onDark">日期</label>
+        <UiDatePicker v-model="draft.day" class="w-full" placeholder="记账日期" position="left" />
+      </div>
+
+      <!-- 流水类型 -->
+      <div>
+        <label class="mb-1 block text-xs font-semibold text-ink-secondary dark:text-ink-onDark">流水类型</label>
+        <select
+          v-model="draft.flowType"
+          data-chat-card-field="flowType"
+          class="w-full rounded-md border border-frame bg-surface px-3 py-2 text-sm text-ink-secondary shadow-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-brand-500 dark:border-frame-dark dark:bg-surface-dark dark:text-ink-onDark"
+          @change="onFlowTypeChange"
+        >
+          <option value="">请选择流水类型</option>
+          <option v-for="t in flowTypeOptions" :key="t" :value="t">{{ t }}</option>
+        </select>
+      </div>
+
+      <!-- 支出/收入类型（候选下拉 + 自由文本，可留空） -->
+      <div>
+        <label class="mb-1 block text-xs font-semibold text-ink-secondary dark:text-ink-onDark">{{ industryTypeLabel }}</label>
+        <div class="relative">
+          <input
+            v-model="draft.industryType"
+            data-chat-card-field="industryType"
+            :placeholder="`${industryTypeLabel}（可留空）`"
+            class="w-full rounded-md border border-frame bg-surface px-3 py-2 text-sm text-ink-secondary shadow-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-brand-500 dark:border-frame-dark dark:bg-surface-dark dark:text-ink-onDark"
+            @input="setCandField('industry')"
+            @focus="setCandField('industry')"
+            @blur="setCandField('')"
+          />
+          <div
+            v-if="openCand === 'industry' && candItems.length"
+            class="absolute z-30 mt-1 max-h-40 w-full overflow-y-auto rounded-md border border-frame bg-surface text-sm shadow-lg dark:border-frame-dark dark:bg-surface-dark"
+            data-chat-card-cand="industryType"
+          >
+            <div
+              v-for="o in candItems"
+              :key="o"
+              class="flex cursor-pointer items-center gap-2 px-3 py-2 text-ink-secondary hover:bg-surface-muted dark:text-ink-onDark dark:hover:bg-surface-darkMuted"
+              @mousedown.prevent="pickCand('industry', o)"
+            >
+              <TagIcon class="h-3.5 w-3.5 flex-shrink-0 text-ink-muted" />
+              {{ o }}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 支付/收款方式 -->
+      <div>
+        <label class="mb-1 block text-xs font-semibold text-ink-secondary dark:text-ink-onDark">{{ payTypeLabel }}</label>
+        <div class="relative">
+          <input
+            v-model="draft.payType"
+            data-chat-card-field="payType"
+            :placeholder="`${payTypeLabel}（可留空）`"
+            class="w-full rounded-md border border-frame bg-surface px-3 py-2 text-sm text-ink-secondary shadow-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-brand-500 dark:border-frame-dark dark:bg-surface-dark dark:text-ink-onDark"
+            @input="setCandField('pay')"
+            @focus="setCandField('pay')"
+            @blur="setCandField('')"
+          />
+          <div
+            v-if="openCand === 'pay' && candItems.length"
+            class="absolute z-30 mt-1 max-h-40 w-full overflow-y-auto rounded-md border border-frame bg-surface text-sm shadow-lg dark:border-frame-dark dark:bg-surface-dark"
+            data-chat-card-cand="payType"
+          >
+            <div
+              v-for="o in candItems"
+              :key="o"
+              class="cursor-pointer px-3 py-2 text-ink-secondary hover:bg-surface-muted dark:text-ink-onDark dark:hover:bg-surface-darkMuted"
+              @mousedown.prevent="pickCand('pay', o)"
+            >
+              {{ o }}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 金额 -->
+      <div>
+        <label class="mb-1 block text-xs font-semibold text-ink-secondary dark:text-ink-onDark">金额</label>
+        <input
+          v-model.number="draft.money"
+          data-chat-card-field="money"
+          type="number"
+          step="0.01"
+          min="0"
+          placeholder="请输入金额"
+          class="w-full rounded-md border border-frame bg-surface px-3 py-2 text-sm text-ink-secondary shadow-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-brand-500 dark:border-frame-dark dark:bg-surface-dark dark:text-ink-onDark"
+        />
+      </div>
+
+      <!-- 流水归属 -->
+      <div>
+        <label class="mb-1 block text-xs font-semibold text-ink-secondary dark:text-ink-onDark">流水归属</label>
+        <div class="relative">
+          <input
+            v-model="draft.attribution"
+            data-chat-card-field="attribution"
+            placeholder="输入或选择归属（可留空）"
+            class="w-full rounded-md border border-frame bg-surface px-3 py-2 text-sm text-ink-secondary shadow-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-brand-500 dark:border-frame-dark dark:bg-surface-dark dark:text-ink-onDark"
+            @input="setCandField('attribution')"
+            @focus="setCandField('attribution')"
+            @blur="setCandField('')"
+          />
+          <div
+            v-if="openCand === 'attribution' && candItems.length"
+            class="absolute z-30 mt-1 max-h-40 w-full overflow-y-auto rounded-md border border-frame bg-surface text-sm shadow-lg dark:border-frame-dark dark:bg-surface-dark"
+            data-chat-card-cand="attribution"
+          >
+            <div
+              v-for="o in candItems"
+              :key="o"
+              class="cursor-pointer px-3 py-2 text-ink-secondary hover:bg-surface-muted dark:text-ink-onDark dark:hover:bg-surface-darkMuted"
+              @mousedown.prevent="pickCand('attribution', o)"
+            >
+              {{ o }}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 流水名称 -->
+      <div>
+        <label class="mb-1 block text-xs font-semibold text-ink-secondary dark:text-ink-onDark">流水名称</label>
+        <input
+          v-model="draft.name"
+          data-chat-card-field="name"
+          placeholder="流水名称"
+          class="w-full rounded-md border border-frame bg-surface px-3 py-2 text-sm text-ink-secondary shadow-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-brand-500 dark:border-frame-dark dark:bg-surface-dark dark:text-ink-onDark"
+        />
+      </div>
+
+      <!-- 说明 -->
+      <div>
+        <label class="mb-1 block text-xs font-semibold text-ink-secondary dark:text-ink-onDark">说明</label>
+        <input
+          v-model="draft.description"
+          data-chat-card-field="description"
+          placeholder="备注说明（可留空）"
+          class="w-full rounded-md border border-frame bg-surface px-3 py-2 text-sm text-ink-secondary shadow-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-brand-500 dark:border-frame-dark dark:bg-surface-dark dark:text-ink-onDark"
+        />
+      </div>
+
+      <!-- 账本（V1 允许改；入账以最终选择为准） -->
+      <div>
+        <label class="mb-1 block text-xs font-semibold text-ink-secondary dark:text-ink-onDark">记入账本</label>
+        <select
+          v-model="selectedBook"
+          data-chat-card-field="book"
+          class="w-full rounded-md border border-frame bg-surface px-3 py-2 text-sm text-ink-secondary shadow-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-brand-500 dark:border-frame-dark dark:bg-surface-dark dark:text-ink-onDark"
+        >
+          <option value="">请选择账本</option>
+          <option v-for="b in books" :key="b.bookId" :value="b.bookId">{{ b.bookName }}</option>
+        </select>
+      </div>
+
+      <!-- 小票勾选（blob 直显；编辑态增删；加载失败留占位仍可取消勾选） -->
+      <div v-if="pool.length">
+        <label class="mb-1 block text-xs font-semibold text-ink-secondary dark:text-ink-onDark">关联小票（点击勾选/取消）</label>
+        <div class="flex flex-wrap gap-1.5" data-chat-card-invoice-list="true">
+          <button
+            v-for="n in pool"
+            :key="n"
+            type="button"
+            data-chat-card-invoice
+            :data-chat-card-invoice-file="n"
+            :data-checked="invoiceOn(n) ? 'true' : 'false'"
+            :title="n"
+            class="relative h-16 w-16 overflow-hidden rounded-md border-2 transition-colors"
+            :class="invoiceOn(n) ? 'border-brand-500' : 'border-frame dark:border-frame-dark'"
+            @click="toggleInvoice(n)"
+          >
+            <img
+              v-if="thumbOf(n)"
+              :src="thumbOf(n)"
+              alt="小票"
+              class="h-full w-full object-cover"
+              loading="lazy"
+              @error="markFailed(n)"
+            />
+            <span
+              v-else
+              class="flex h-full w-full items-center bg-surface-muted px-1 text-center text-[10px] leading-tight text-ink-muted dark:bg-surface-darkMuted"
+            >
+              {{ loadFailed.includes(n) ? "加载失败" : "加载中…" }}
+            </span>
+            <span
+              class="absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full border"
+              :class="invoiceOn(n) ? 'bg-brand-500 text-white' : 'bg-surface/80 text-transparent dark:bg-surface-dark/80'"
+            >
+              <CheckBadgeIcon class="h-3 w-3" />
+            </span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 操作：收起 / 入账 -->
+      <div class="flex items-center justify-end gap-2 pt-1">
+        <button
+          type="button"
+          data-chat-card-collapse
+          class="rounded-md border border-frame px-3 py-1.5 text-xs font-medium text-ink-secondary hover:bg-surface-muted dark:border-frame-dark dark:text-ink-onDark dark:hover:bg-surface-darkMuted"
+          @click="cancelEdit"
+        >
+          收起
+        </button>
+        <button
+          type="button"
+          data-chat-card-save
+          :disabled="saving || booked || streaming"
+          class="rounded-md bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-500 disabled:cursor-not-allowed disabled:bg-brand-600/50"
+          @click="onBook"
+        >
+          {{ saving ? "入账中…" : "入账" }}
+        </button>
+      </div>
+    </div>
+
+    <!-- 概览操作（未入账：编辑 + 入账；已入账：查看流水链接） -->
+    <div v-else class="mt-2 flex items-center justify-between gap-2">
+      <button
+        v-if="!booked"
+        type="button"
+        data-chat-card-edit
+        :disabled="streaming"
+        class="inline-flex items-center gap-1 rounded-md border border-frame px-2.5 py-1 text-xs font-medium text-ink-secondary hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50 dark:border-frame-dark dark:text-ink-onDark dark:hover:bg-surface-darkMuted"
+        @click="openEdit"
+      >
+        <PencilSquareIcon class="h-3.5 w-3.5" />
+        编辑
+      </button>
+      <span v-else class="min-w-0 truncate text-xs text-ink-muted">流水已生成，可在流水页查看或修改</span>
+      <a
+        v-if="booked"
+        data-chat-card-flow-link
+        :href="flowLink"
+        data-chat-card-booked-link="true"
+        class="inline-flex flex-shrink-0 items-center gap-1 rounded-md bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-500"
+      >
+        查看流水
+      </a>
+      <button
+        v-else
+        type="button"
+        data-chat-card-save
+        :disabled="saving || streaming"
+        class="flex-shrink-0 rounded-md bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-500 disabled:cursor-not-allowed disabled:bg-brand-600/50"
+        @click="onBook"
+      >
+        {{ saving ? "入账中…" : "入账" }}
+      </button>
+    </div>
+
+    <!-- 大图蒙版（fixed 脱流，不影响卡片布局） -->
+    <ChatImageViewer :src="viewerSrc" :open="!!viewerSrc" @close="viewerSrc = ''" />
+  </div>
+</template>

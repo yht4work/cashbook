@@ -58,7 +58,9 @@ export const ModelName = {
   Budget: 'Budget',
   Receivable: 'Receivable',
   FixedFlow: 'FixedFlow',
-  TypeRelation: 'TypeRelation'
+  TypeRelation: 'TypeRelation',
+  ChatSession: 'ChatSession',
+  ChatMessage: 'ChatMessage'
 } as const
 
 export type ModelName = (typeof ModelName)[keyof typeof ModelName]
@@ -192,6 +194,32 @@ export const TypeRelationScalarFieldEnum = {
 } as const
 
 export type TypeRelationScalarFieldEnum = (typeof TypeRelationScalarFieldEnum)[keyof typeof TypeRelationScalarFieldEnum]
+
+
+export const ChatSessionScalarFieldEnum = {
+  id: 'id',
+  userId: 'userId',
+  title: 'title',
+  createDate: 'createDate',
+  updateDate: 'updateDate'
+} as const
+
+export type ChatSessionScalarFieldEnum = (typeof ChatSessionScalarFieldEnum)[keyof typeof ChatSessionScalarFieldEnum]
+
+
+export const ChatMessageScalarFieldEnum = {
+  id: 'id',
+  sessionId: 'sessionId',
+  userId: 'userId',
+  role: 'role',
+  content: 'content',
+  images: 'images',
+  flows: 'flows',
+  status: 'status',
+  createDate: 'createDate'
+} as const
+
+export type ChatMessageScalarFieldEnum = (typeof ChatMessageScalarFieldEnum)[keyof typeof ChatMessageScalarFieldEnum]
 
 
 export const SortOrder = {

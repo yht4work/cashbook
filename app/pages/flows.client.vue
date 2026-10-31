@@ -12,7 +12,8 @@
     <!-- 流水表格 -->
     <FlowsTable :flows="flowPageRef.data || []" :selected-items="selectedFlows" :is-all-selected="isAllSelected"
       :current-page="flowQuery.pageNum || 1" :page-size="flowQuery.pageSize || 30" :total="flowPageRef.total || 0"
-      :total-pages="totalPages" :page-numbers="pageNumbers" :loading="loading" @toggle-select-all="toggleSelectAll"
+      :total-pages="totalPages" :page-numbers="pageNumbers" :loading="loading" :highlight-id="highlightId"
+      @toggle-select-all="toggleSelectAll"
       @toggle-select-item="toggleSelectItem" @edit-item="editItem" @edit-invoice="editInvoice" @delete-item="deleteItem"
       @change-page="changePage" @change-page-size="changePageSize" />
 
@@ -246,6 +247,65 @@ const batchChange = ref<any>({
   attribution: "",
 });
 
+// 深链高亮（评审轮1#5；轮2#1/#2/#5）：chat 确认卡「查看流水」→
+// /flows?highlight=<flowId>&bookId=<账本>。
+// - bookId（V1.2 卡片分账本）：卡所记账本与当前账本不同时查询口径用它
+//   覆盖，但不写 localStorage、不切全局账本；深链结束后回当前账本。
+// - 挂载时转成 id 精确过滤（flow/page 的 body.id），行到手后定位+圈亮约 3
+//   秒；圈亮收口（轮2#1）摘掉 id/bookId 过滤 + 剥掉 URL 参数 + 再查一次
+//   常规列表——修掉旧实现「过滤永不清除」：翻页/搜索/改条数从此不被钉在
+//   单条流水、统计也是全账本口径，URL 刷新也不再重钉；过滤后仍取不到行
+//   （流水被删/换账本后的旧深链）同样走收口退回常规列表。
+const router = useRouter();
+const route = useRoute();
+const highlightId = ref<number | null>(null);
+/** 深链 bookId 覆盖（只作用于查询参数，不碰全局账本切换） */
+const highlightBookId = ref<string | null>(null);
+
+/** 剥掉 URL 里的 highlight/bookId 参数（轮2#1）：刷新不再重新钉回深链 */
+const stripDeepLinkParams = (): void => {
+  if (route.query.highlight === undefined && route.query.bookId === undefined) {
+    return;
+  }
+  router.replace({ query: { ...route.query, highlight: undefined, bookId: undefined } });
+};
+
+/** 深链收口：摘掉 id/bookId 过滤与高亮、剥 URL 参数、再查一次常规列表 */
+const clearDeepLink = (): void => {
+  highlightId.value = null;
+  delete flowQuery.value.id;
+  highlightBookId.value = null;
+  stripDeepLinkParams();
+  doQuery();
+};
+
+let highlightTimer: ReturnType<typeof setTimeout> | undefined;
+const highlightNow = (id: number): void => {
+  // （轮2#5）桌面/移动两套行同时常驻 DOM（一方 display:none），querySelector
+  // 的首个命中可能是不可见元素，scrollIntoView 静默无效——querySelectorAll
+  // 里取 offsetParent 非空（真渲染中）的那个来定位
+  const el = Array.from(document.querySelectorAll<HTMLElement>(`[data-flow-id="${id}"]`)).find(
+    (e) => e.offsetParent !== null
+  );
+  if (el) {
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+  // 圈亮结束 → 深链收口（轮2#1）；元素没渲染成（罕见时序）也照收——
+  // 过滤不允许永久挂着，只是不滚动不圈亮。
+  highlightTimer = setTimeout(() => {
+    highlightTimer = undefined;
+    if (highlightId.value === id) {
+      clearDeepLink();
+    }
+  }, 3200);
+};
+onBeforeUnmount(() => {
+  if (highlightTimer) {
+    clearTimeout(highlightTimer);
+    highlightTimer = undefined;
+  }
+});
+
 // 获取数据列表
 const nameList = ref<string[]>([]);
 const getNames = async () => {
@@ -280,11 +340,25 @@ const doQuery = () => {
   doApi
     .post<Page<Flow>>("api/entry/flow/page", {
       ...flowQuery.value,
-      bookId: localStorage.getItem("bookId"),
+      // 深链 bookId 覆盖（轮2#2）：跨账本卡片深链按卡账本查询；收口后回
+      // 当前账本（highlightBookId 已清 → localStorage 口径）
+      bookId: highlightBookId.value ?? localStorage.getItem("bookId"),
     })
     .then((res) => {
       if (res) {
         flowPageRef.value = res;
+      }
+      // 深链收口：命中 → 定位圈亮（圈亮结束由 highlightNow 走 clearDeepLink）；
+      // 取不到行（流水被删/换账本后的旧深链）→ 当场收口退回常规列表
+      //（再进来一次，guard：highlightId 已清，不会再进这段）
+      const hl = highlightId.value;
+      if (hl) {
+        const rows: any[] = res?.data || [];
+        if (rows.some((f) => Number(f.id) === hl)) {
+          nextTick(() => highlightNow(hl));
+        } else {
+          clearDeepLink();
+        }
       }
     })
     .catch((error) => {
@@ -368,7 +442,14 @@ const changePage = (page: number | string) => {
 };
 
 const handleSearchApply = (query: any) => {
+  // 手动搜索接管（轮2#1）：深链 id 过滤与 bookId 覆盖先解除（抽屉回传对象
+  // 可能把旧 id 带回来，assign 后再删一次）并把 URL 清干净——否则若搜索
+  // 结果不含钉住的那条，深链收口机制会把用户的搜索整个清掉退回常规列表
   Object.assign(flowQuery.value, query);
+  delete flowQuery.value.id;
+  highlightId.value = null;
+  highlightBookId.value = null;
+  stripDeepLinkParams();
   flowQuery.value.pageNum = 1;
   doQuery();
 };
@@ -388,6 +469,9 @@ const resetQuery = () => {
     minMoney: undefined,
     maxMoney: undefined,
   };
+  highlightId.value = null; // 重置也摘掉深链高亮
+  highlightBookId.value = null; // bookId 覆盖一并撤销（回 localStorage 当前账本）
+  stripDeepLinkParams(); // URL 的 highlight/bookId 一并剥掉（否则刷新重钉）
   selectedFlows.value = [];
   doQuery();
 };
@@ -780,6 +864,18 @@ const closeInvoiceDialog = () => {
 
 // 初始化数据
 onMounted(() => {
+  // 深链高亮：?highlight=<flowId>[&bookId=<账本>] → id 精确过滤 + bookId
+  // 覆盖查询（V1.2 卡片分账本的跨账本深链），见顶部注释；不带 highlight
+  // 的裸 bookId 参数不解析（保持本页既有不受深链机制影响）
+  const hl = Number(route.query.highlight);
+  const deepBook = typeof route.query.bookId === "string" ? route.query.bookId.trim() : "";
+  if (Number.isInteger(hl) && hl > 0) {
+    highlightId.value = hl;
+    flowQuery.value.id = hl;
+    if (deepBook) {
+      highlightBookId.value = deepBook;
+    }
+  }
   getNames();
   getAttributions();
   doQuery();
