@@ -1,4 +1,5 @@
 import * as service from "~~/server/utils/chat/service";
+import { failRowOf } from "~~/server/utils/chat/sendCore";
 
 /**
  * @swagger
@@ -37,6 +38,6 @@ export default defineEventHandler(async (event) => {
     return success(await service.getMessages(await getUserId(event), sessionId));
   } catch (err: any) {
     console.error(err);
-    return error(err?.message ?? String(err));
+    return error(failRowOf(err, "消息获取失败，请稍后重试")); // 评审轮4#1 同类统一：壳层 catch 脱敏
   }
 });

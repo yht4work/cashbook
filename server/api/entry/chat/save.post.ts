@@ -1,4 +1,4 @@
-import { chatSave } from "~~/server/utils/chat/sendCore";
+import { chatSave, failRowOf } from "~~/server/utils/chat/sendCore";
 
 /**
  * @swagger
@@ -36,6 +36,6 @@ export default defineEventHandler(async (event) => {
     return await chatSave(await readFormData(event), await getUserId(event));
   } catch (err: any) {
     console.error(err);
-    return error(err?.message ?? String(err));
+    return error(failRowOf(err, "入账失败，请稍后重试")); // 评审轮4#1：壳层 catch 不透传原始错误（readFormData 失败等）
   }
 });
