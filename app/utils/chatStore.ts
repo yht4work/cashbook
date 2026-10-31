@@ -75,18 +75,15 @@ interface ChatState {
   currentId: number | null;
   messages: ChatMessageItem[];
   streaming: boolean;
+  /** 草稿态标记（T13/评审轮1#10）：「新建」进草稿后为 true，直到建档或选
+   *  中既有会话。会话面板 remount（1024px 断点翻转/抽屉开关）时据此不再
+   *  自动跳进最近会话，保住用户尚未发送的草稿意图。 */
+  draftActive: boolean;
 }
 
 /** 卡片已入账判定（与 server/utils/chat/history.ts 的 cardBooked 同口径） */
 export const cardBooked = (c: DraftFlow): boolean =>
   typeof c.flowId === "number" && c.flowId > 0;
-
-/** 小票图片直显地址（GET /api/entry/flow/invoice/show，浏览器直接显示）
- *  ⚠ 该地址只给「能带 Authorization 头的请求」用：<img>/<a> 标签带不上这个
- *  裸头（server/middleware/auth.ts 对 /api/entry 一律先验的头是 header），
- *  直接当 src 会拿到 {"c":400,"m":"No Authorization"}——要显示请用 chatImageBlob。 */
-export const chatImageSrc = (name: string): string =>
-  "/api/entry/flow/invoice/show?invoice=" + encodeURIComponent(name);
 
 /** show 接口的小票 blob URL 缓存（按文件名；页面生命周期内复用，不逐卡重复下载） */
 const imageBlobCache = new Map<string, string>();
@@ -128,6 +125,26 @@ export const chatImageBlob = (name: string): Promise<string | null> => {
       return url;
     })
     .catch(() => null);
+};
+
+/**
+ * 登出/换账号的客户端缓存清理（评审轮1#8）：objectURL 全部 revoke——旧实现
+ * 缓存从不释放（长驻标签页随浏览量累积内存），且登出换号后仍会用旧账号的
+ * blob 渲染同名文件；账本列表缓存（60s TTL）一并作废。
+ * 在 app/layouts/public.vue 的 logout 里调用；顺带 $reset chat store。
+ */
+export const resetChatClientCache = (): void => {
+  if (typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+    for (const url of imageBlobCache.values()) {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {
+        // 已失效，忽略
+      }
+    }
+  }
+  imageBlobCache.clear();
+  chatBookListCache = null;
 };
 
 /** auth 头：与 doApi.getHeaders 同款（cookie → 裸 Authorization 头） */
@@ -347,6 +364,7 @@ export const useChatStore = defineStore("chat", {
     currentId: null,
     messages: [],
     streaming: false,
+    draftActive: false,
   }),
 
   getters: {
@@ -392,6 +410,7 @@ export const useChatStore = defineStore("chat", {
       this.sessions.unshift({ id, title: null, updateDate: new Date().toISOString() });
       this.currentId = id;
       this.messages = [];
+      this.draftActive = false;
       return id;
     },
 
@@ -403,6 +422,7 @@ export const useChatStore = defineStore("chat", {
     startDraft(): void {
       this.currentId = null;
       this.messages = [];
+      this.draftActive = true;
     },
 
     /**
@@ -452,6 +472,7 @@ export const useChatStore = defineStore("chat", {
         return;
       }
       this.currentId = sid;
+      this.draftActive = false; // 选中既有会话，草稿态结束（含面板 remount 的自动选中）
       try {
         const rows = await doApi.get<
           Array<{
@@ -510,13 +531,24 @@ export const useChatStore = defineStore("chat", {
       }
       // 懒创建（T13）：草稿态（currentId=null）首次发送才真正建档，从此不再有
       // 「从未发过言的空会话」。建档失败（未登录/网络）原样上抛——send 载体是
-      // await store.send，调用方按现有约定保留输入。流式期间输入已整体锁定，
-      // 天然挡住重复建会话，无需再加锁。
-      if (!this.currentId) {
-        // 注意：createSession 返回的是裸 id（number），不是 {id} 对象；
-        // 且失败（未登录/网络/拿不到 id）时它自己 throw——走到这里 id 必有效
-        this.currentId = await this.createSession();
+      // await store.send，调用方按现有约定保留输入。
+      // 输入锁先占闸再建档（评审轮1#3）：旧实现 streaming 置位在建档 await
+      // 之后，建档窗口（百毫秒级网络往返）里双击回车/重复点发送会双双过闸各
+      // 建一个会话——现在建档前就置位，窗口内第二个 send 直接被闸挡下。
+      // 建档是置位后唯一的 await，其余到后台 IIFE 启动之间全是同步语句；
+      // 异常只会来自 createSession，其 catch 已释放闸。
+      this.streaming = true;
+      try {
+        if (!this.currentId) {
+          // 注意：createSession 返回的是裸 id（number），不是 {id} 对象；
+          // 且失败（未登录/网络/拿不到 id）时它自己 throw——走到这里 id 必有效
+          this.currentId = await this.createSession();
+        }
+      } catch (e) {
+        this.streaming = false; // 建档失败：闸随失败一起释放（成功路径由后台收尾释放）
+        throw e;
       }
+      this.draftActive = false; // 离开草稿态（面板 remount 时的自动选中不再劫持）
       const sessionId = Number(this.currentId) || 0;
 
       const fd = new FormData();
@@ -560,7 +592,7 @@ export const useChatStore = defineStore("chat", {
       // push 后从数组取回 reactive 代理：后续按代理逐帧修改才能触发视图更新
       const streamRow = this.messages[this.messages.length - 1];
       const userRow = this.messages[this.messages.length - 2];
-      this.streaming = true;
+      // streaming 已在上面的建档前占闸（评审轮1#3），此处不再重复置位
 
       // 流的消费移后台（V1.2 反馈）：返回值语义「请求已发出，调用方可清输入」
       // 必须立即兑现——此前一直等整轮 SSE 读完才 resolve，移动端视觉生成动辄

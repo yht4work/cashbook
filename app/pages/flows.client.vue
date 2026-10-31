@@ -12,7 +12,8 @@
     <!-- 流水表格 -->
     <FlowsTable :flows="flowPageRef.data || []" :selected-items="selectedFlows" :is-all-selected="isAllSelected"
       :current-page="flowQuery.pageNum || 1" :page-size="flowQuery.pageSize || 30" :total="flowPageRef.total || 0"
-      :total-pages="totalPages" :page-numbers="pageNumbers" :loading="loading" @toggle-select-all="toggleSelectAll"
+      :total-pages="totalPages" :page-numbers="pageNumbers" :loading="loading" :highlight-id="highlightId"
+      @toggle-select-all="toggleSelectAll"
       @toggle-select-item="toggleSelectItem" @edit-item="editItem" @edit-invoice="editInvoice" @delete-item="deleteItem"
       @change-page="changePage" @change-page-size="changePageSize" />
 
@@ -246,6 +247,25 @@ const batchChange = ref<any>({
   attribution: "",
 });
 
+// 深链高亮（评审轮1#5）：chat 确认卡「查看流水」→ /flows?highlight=<flowId>；
+// 挂载时转成 id 精确过滤（flow/page 的 body.id），行到手后定位+圈亮约 3 秒，
+// 过滤后仍取不到行（换账本后的旧深链）则退回常规列表。
+const route = useRoute();
+const highlightId = ref<number | null>(null);
+
+const highlightNow = (id: number): void => {
+  const el = document.querySelector(`[data-flow-id="${id}"]`);
+  if (!el) {
+    return;
+  }
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  setTimeout(() => {
+    if (highlightId.value === id) {
+      highlightId.value = null;
+    }
+  }, 3200);
+};
+
 // 获取数据列表
 const nameList = ref<string[]>([]);
 const getNames = async () => {
@@ -285,6 +305,21 @@ const doQuery = () => {
     .then((res) => {
       if (res) {
         flowPageRef.value = res;
+      }
+      // highlight 深链收口：过滤命中 → 定位圈亮；取不到行（跨账本旧链）→
+      // 摘掉 id 过滤退回常规列表（再进来一次，guard：此时 highlightId 已清）
+      const hl = highlightId.value;
+      if (hl) {
+        const rows: any[] = res?.data || [];
+        if (rows.some((f) => Number(f.id) === hl)) {
+          nextTick(() => highlightNow(hl));
+        } else if (flowQuery.value.id) {
+          flowQuery.value.id = undefined;
+          highlightId.value = null;
+          doQuery();
+        } else {
+          highlightId.value = null;
+        }
       }
     })
     .catch((error) => {
@@ -388,6 +423,7 @@ const resetQuery = () => {
     minMoney: undefined,
     maxMoney: undefined,
   };
+  highlightId.value = null; // 重置也摘掉深链高亮
   selectedFlows.value = [];
   doQuery();
 };
@@ -780,6 +816,12 @@ const closeInvoiceDialog = () => {
 
 // 初始化数据
 onMounted(() => {
+  // 深链高亮：?highlight=<flowId> → id 精确过滤（flow/page 支持），见上
+  const hl = Number(route.query.highlight);
+  if (Number.isInteger(hl) && hl > 0) {
+    highlightId.value = hl;
+    flowQuery.value.id = hl;
+  }
   getNames();
   getAttributions();
   doQuery();

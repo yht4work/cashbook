@@ -9,8 +9,8 @@
  * - chatOnce：stream:false 的单发便捷封装（会话起标题这类小活），正文同样
  *   剥 think 块。
  * - 错误面统一抛 OllamaError（简短中文 message）：连不上 / 连接兜底超时 /
- *   非 200 / 正文中途断流 / NDJSON 错误行。坏行（不可解析的 NDJSON 行）按
- *   防御性容忍跳过，不打崩整条流。
+ *   读正文挂起超时 / 非 200 / 正文中途断流 / NDJSON 错误行。坏行（不可解析
+ *   的 NDJSON 行）按防御性容忍跳过，不打崩整条流。
  */
 
 export type OllamaCfg = { baseUrl: string; model: string };
@@ -22,8 +22,15 @@ export class OllamaError extends Error {
   }
 }
 
-/** 连上之后等响应头的兜底时限；读完头就撤（流式读不设总时限，长正文不该被掐） */
+/** 连上之后等响应头的兜底时限；读完头就撤 */
 const CONNECT_TIMEOUT_MS = 30_000;
+
+/**
+ * 流式/正文读取的「无字间隙」上限（评审轮1#1）：不是总时限——正常生成中
+ * chunk 持续到达、每次读都会续期，长正文不被掐；只有模型挂起/连接黑洞
+ * （headers 已到但 body 永远不来）才在此超时，中断后前端才能解锁、重试。
+ */
+const READ_STALL_TIMEOUT_MS = 90_000;
 
 // 模型偶尔把推理直接吐在正文里（inline 标签或裸叙述），这里对标签自己剥
 // （独立 thinking 字段则按上文整体不读）。标签用拼接写出（7 / 8 字符），
@@ -96,9 +103,15 @@ const makeThinkFilter = () => {
  * 模型的英文叙述赶进 content（正文 "The user says…"、标题 "Theuserwants"）。
  * 推理在独立通道时正文/标题都干净——质量优先，如需提速可回退 think:false。
  * 连不上（含 baseUrl 写坏解析失败）与连接兜底超时分两条中文 message；
- * 非 200 一律按错误状态抛。
+ * 非 200 一律按错误状态抛。返回体带 abort（把头等连接中断掉）：body 读取
+ * 阶段的挂起守卫（READ_STALL_TIMEOUT_MS）需要它能真正掐断底层连接，
+ * 单靠 reader.cancel() 不保证 socket 关闭。
  */
-const ollamaRequest = async (cfg: OllamaCfg, messages: unknown[], stream: boolean) => {
+const ollamaRequest = async (
+  cfg: OllamaCfg,
+  messages: unknown[],
+  stream: boolean
+): Promise<{ res: Response; abort: () => void }> => {
   const killer = new AbortController();
   const timer = setTimeout(() => killer.abort(), CONNECT_TIMEOUT_MS);
   let res: Response;
@@ -121,7 +134,7 @@ const ollamaRequest = async (cfg: OllamaCfg, messages: unknown[], stream: boolea
   if (!res.ok) {
     throw new OllamaError(`ollama 返回错误状态 ${res.status}`);
   }
-  return res;
+  return { res, abort: () => killer.abort() };
 };
 
 /** 错误行的文案透传（ollama 200 响应流里也可能带 error 对象） */
@@ -136,9 +149,11 @@ const rejectIfErrorLine = (chunk: { error?: unknown }): void => {
 export const chatStream = async (
   cfg: OllamaCfg,
   messages: unknown[],
-  onDelta: (d: string) => void
+  onDelta: (d: string) => void,
+  /** 挂起阈值（测试注入小值；默认 READ_STALL_TIMEOUT_MS） */
+  stallMs: number = READ_STALL_TIMEOUT_MS
 ): Promise<{ content: string }> => {
-  const res = await ollamaRequest(cfg, messages, true);
+  const { res, abort } = await ollamaRequest(cfg, messages, true);
   const reader = res.body?.getReader();
   if (!reader) {
     throw new OllamaError("ollama 返回空响应");
@@ -173,9 +188,33 @@ export const chatStream = async (
     }
   };
 
+  /**
+   * 带挂起守卫的单次读（评审轮1#1）：READ_STALL_TIMEOUT_MS 内一个字都没来
+   * 就 abort 底层连接并抛超时——旧实现 headers 到手后任何一步 read 都无界，
+   * 模型挂起会把整条聊天永久锁死（streaming 卡 true 只能刷新逃生）。
+   * race 落败方的 read 在 abort 后自行 reject，race 本就订阅了双方、
+   * 无 unhandled rejection 挂账。
+   */
+  const readOnce = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            abort();
+            reject(new OllamaError("ollama 流式响应超时"));
+          }, stallMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readOnce();
       if (done) {
         break;
       }
@@ -194,7 +233,7 @@ export const chatStream = async (
   } catch (err) {
     void reader.cancel().catch(() => {}); // 残局收掉，不留挂死连接
     if (err instanceof OllamaError) {
-      throw err; // 行内业务错误（如 error 行）原样透传，不换文案
+      throw err; // 行内业务错误（如 error 行）与挂起超时原样透传，不换文案
     }
     throw new OllamaError("ollama 流中断");
   }
@@ -204,12 +243,23 @@ export const chatStream = async (
 
 /** 非流式单发（会话起标题这类小活）：返回剥净的正文 */
 export const chatOnce = async (cfg: OllamaCfg, prompt: string): Promise<string> => {
-  const res = await ollamaRequest(cfg, [{ role: "user", content: prompt }], false);
+  const { res, abort } = await ollamaRequest(cfg, [{ role: "user", content: prompt }], false);
+  // 正文读取同样受挂起守卫保护（评审轮1#1），非流式路径 abort 即断
+  let stalled = false;
+  const bodyTimer = setTimeout(() => {
+    stalled = true;
+    abort();
+  }, READ_STALL_TIMEOUT_MS);
   let json: { error?: unknown; message?: { content?: unknown } };
   try {
-    json = await res.json();
+    json = (await res.json()) as typeof json;
   } catch {
+    if (stalled) {
+      throw new OllamaError("ollama 响应超时");
+    }
     throw new OllamaError("ollama 响应不是 JSON");
+  } finally {
+    clearTimeout(bodyTimer);
   }
   rejectIfErrorLine(json);
   const c = json?.message?.content;

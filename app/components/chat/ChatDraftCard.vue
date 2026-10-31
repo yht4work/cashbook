@@ -32,13 +32,12 @@ import ChatImageViewer from "~/components/chat/ChatImageViewer.vue";
  *   成功后 store 把 flowId/bookId 与本次编辑值合并回卡片，卡片转只读。
  * - 已入卡锁定：不渲染编辑/入账/勾选控件；再入账服务端也以「该卡片已入账」拒绝。
  *
- * props.editing：外部初始/驱动的编辑态（默认收起）；开关由卡片自持。
+ * 编辑开关由卡片自持（评审轮1#9：旧 editing prop 从未被父级传入，是死接口）。
  */
 interface Props {
   card: DraftFlow;
   index: number;
   messageId: number;
-  editing?: boolean;
   /** 本消息行仍在流式生成（行 id 未固化=0：入账必被「卡片数据无效」拒，
    *  编辑会在 done 后的重挂中丢）——此时卡片动作整体禁用 */
   streaming?: boolean;
@@ -47,7 +46,6 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  editing: false,
   streaming: false,
   ctxInvoices: () => [],
 });
@@ -58,16 +56,8 @@ const store = useChatStore();
 
 const booked = computed(() => cardBooked(props.card));
 
-/** 编辑开关（prop.editing 变化可驱动打开——父级/e2e 用；卡片本体自持开关） */
-const editing = ref(props.editing && !cardBooked(props.card));
-watch(
-  () => props.editing,
-  (v) => {
-    if (v && !booked.value) {
-      openEdit();
-    }
-  }
-);
+/** 编辑开关（卡片自持；概览态「编辑」钮进入，收起/入账成功退出） */
+const editing = ref(false);
 
 /** 草稿（表单数据源；进编辑态从 card 拷贝，取消/收起则丢弃） */
 const draft = ref<DraftFlow>({

@@ -45,11 +45,14 @@ export default defineEventHandler(async (event) => {
       ),
     ].slice(0, 100);
     const dataPath = String(useRuntimeConfig(event).dataPath || "") || process.cwd();
+    // 被引用小票名单预扫一次（评审轮1#6）：旧实现逐会话调 deleteSession 会
+    // 重复扫全量 Flow，批量 100 个会话 × 大账户流水就是 100 次全表查
+    const referenced = await service.referencedInvoiceNames(userId);
     let deleted = 0;
     for (const id of ids) {
       // 单个失败（别人的/不存在的 id）只跳过该 id，不中断整批
       try {
-        await service.deleteSession(userId, id, dataPath);
+        await service.deleteSession(userId, id, dataPath, referenced);
         deleted += 1;
       } catch (skip) {
         console.warn(`[chat] batchDelete 跳过会话 ${id}`, (skip as Error)?.message ?? skip);

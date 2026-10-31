@@ -143,4 +143,53 @@ describe("chatStore.send 请求已发出即返回", () => {
     await vi.waitFor(() => expect(store.streaming).toBe(false));
     expect(h.apiGet).toHaveBeenCalledWith("api/entry/chat/messages", { sessionId: 11 });
   });
+
+  it("草稿建档窗口的重复 send 不双建：第二个 send 被先占的输入锁挡下（评审轮1#3）", async () => {
+    vi.stubGlobal("localStorage", { getItem: () => "1" });
+    const eof = new Response(
+      new ReadableStream<Uint8Array>({ start(c) { c.close(); } }),
+      { headers: { "content-type": "text/event-stream" } }
+    );
+    const fetchSpy = vi.fn(async () => eof);
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // 建档悬置在测试手里（模拟百毫秒建档窗口）：此间第二个 send 必须过不了闸
+    let release!: (v: { id: number }) => void;
+    h.apiPost.mockImplementationOnce(
+      () => new Promise((res) => { release = res; })
+    );
+    const store = useChatStore();
+    const p1 = store.send("第一条");
+    expect(await store.send("第二条")).toBe(false); // 建档窗口内：输入锁已占闸
+    expect(h.apiPost).toHaveBeenCalledTimes(1); // 没建第二个会话
+    expect(fetchSpy).not.toHaveBeenCalled(); // 第二发也没发出请求
+
+    release({ id: 11 });
+    await expect(p1).resolves.toBe(true);
+    expect(h.apiPost).toHaveBeenCalledTimes(1); // 前后合计仍只有一次建档
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("草稿态标记（评审轮1#10）：startDraft 置位；建档（send）与选中既有会话清除", async () => {
+    vi.stubGlobal("localStorage", { getItem: () => "1" });
+    const eof = new Response(
+      new ReadableStream<Uint8Array>({ start(c) { c.close(); } }),
+      { headers: { "content-type": "text/event-stream" } }
+    );
+    vi.stubGlobal("fetch", vi.fn(async () => eof));
+    const store = useChatStore();
+
+    store.startDraft();
+    expect(store.draftActive).toBe(true); // 面板 remount 时不得劫持回最近会话
+
+    await store.loadMessages(5); // 选中既有会话同样退出草稿态
+    expect(store.draftActive).toBe(false);
+    expect(store.currentId).toBe(5);
+
+    store.startDraft();
+    expect(store.draftActive).toBe(true);
+    await expect(store.send("第一条")).resolves.toBe(true); // 建档即出草稿
+    expect(store.draftActive).toBe(false);
+    expect(store.currentId).toBe(11);
+  });
 });

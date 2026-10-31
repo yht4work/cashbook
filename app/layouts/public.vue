@@ -7,6 +7,7 @@ import {
 } from "~/utils/flag";
 import { useSystemStore } from "~/utils/store";
 import { getUserInfo, doApi } from "~/utils/api";
+import { useChatStore, resetChatClientCache } from "~/utils/chatStore";
 
 // Responsive state
 const isMobile = ref(false);
@@ -83,6 +84,10 @@ const logout = () => {
   pageLoading.value = true;
   localStorage.removeItem("bookId");
   localStorage.removeItem("bookName");
+  // chat 会话数据按用户隔离（评审轮1#8）：登出时清 blob 缓存与 store 里的
+  // 会话/消息，换账号不再看到前任登录的会话内容与图片
+  resetChatClientCache();
+  useChatStore().$reset();
   doApi.get("api/logout").then(() => {
     Alert.success("退出登录");
     setTimeout(() => {

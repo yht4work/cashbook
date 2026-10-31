@@ -118,6 +118,11 @@ const seedActiveSession = async (userId: number, text = "第一条"): Promise<{ 
 const sessionOf = async (id: number) =>
   (await prisma.chatSession.findUnique({ where: { id } })) as NonNullable<Awaited<ReturnType<typeof prisma.chatSession.findUnique>>>;
 
+/** 保底创建 Book 行（评审轮1#2 起 getContext 做账本归属校验需要真实行） */
+const ensureBook = async (bookId: string, userId: number): Promise<void> => {
+  await prisma.book.create({ data: { bookId, bookName: "评审测试账本", userId } });
+};
+
 describe("sessions：列表 / 新建", () => {
   it("createSession 空标题起步；listSessions 按 updateDate 倒序且只含本用户会话", async () => {
     // 种子会话都先落一条消息（seedActiveSession）：listSessions 的空会话清扫
@@ -371,6 +376,17 @@ describe("getMessage / lastMessageId / finalizeFailedRetry（终审 M4/M5：find
 });
 
 describe("getContext", () => {
+  // 评审轮1#2 归属校验需要真实 Book 行：非本人/不存在的账本一律拒绝；
+  // describe 收尾把 test-chat-* 的 Book 全清（含「非本人账本」用例种给别人行的）
+  beforeAll(async () => {
+    await ensureBook(BOOK_CTX, UID);
+    await ensureBook(BOOK_CAND, UID);
+    await ensureBook(BOOK_SHARED, UID);
+  });
+  afterAll(async () => {
+    await prisma.book.deleteMany({ where: { bookId: { startsWith: "test-chat-" } } });
+  });
+
   /** 造一批消息：12 组 user/assistant + 已入账轮 + 三条含图 user 轮（共 28 条） */
   const seedMessages = async (sessionId: number): Promise<string> => {
     for (let k = 0; k <= 10; k++) {
@@ -455,6 +471,14 @@ describe("getContext", () => {
     } finally {
       await prisma.chatSession.deleteMany({ where: { id: foreign.id } });
     }
+  });
+
+  it("非本人的账本 → 抛「账本不存在」（评审轮1#2）：distinct 候选/最近流水不进 system prompt", async () => {
+    // 他人账本 + 挂一条带可识别取值的流水：被拒后任何值都不许冒进 prompt
+    await ensureBook("test-chat-foreign", UID_OTHER);
+    await mkFlow("test-chat-foreign", { industryType: "他人类型", payType: "他人方式", attribution: "他人归属", name: "他人流水", money: 88 });
+    const { id } = await createSession(UID);
+    await expect(getContext(UID, id, "test-chat-foreign")).rejects.toThrow("账本不存在");
   });
 
   it("getContext 加法（Task 6）：cand/today 与 system 同源；beforeId 把失败轮截出 turns", async () => {
@@ -897,7 +921,7 @@ describe("ensureTitle", () => {
 });
 
 describe("saveImages / loadImages", () => {
-  it("存图命名 chat-{sessionId}-{ts}-{n}.{ext}（同一批同 ts），readable 为 base64", async () => {
+  it("存图命名 chat-{sessionId}-{ts}-{rand}-{n}.{ext}（同一批同 ts、同 rand），readable 为 base64", async () => {
     const { id } = await createSession(UID);
     const b1 = Buffer.from("AAA-A");
     const b2 = Buffer.from("BBB-B");
@@ -907,15 +931,36 @@ describe("saveImages / loadImages", () => {
       { ext: "jpg", data: b2 }, // 不带点也能补上
     ], tmpDir);
 
-    expect(names[0]).toMatch(new RegExp(`^chat-${id}-\\d+-1\\.png$`));
-    expect(names[1]).toMatch(new RegExp(`^chat-${id}-\\d+-2\\.jpg$`));
+    expect(names[0]).toMatch(new RegExp(`^chat-${id}-\\d+-[0-9a-f]+-1\\.png$`));
+    expect(names[1]).toMatch(new RegExp(`^chat-${id}-\\d+-[0-9a-f]+-2\\.jpg$`));
     expect(names[1].split("-")[2]).toBe(names[0].split("-")[2]); // 同一批同 ts
+    expect(names[1].split("-")[3]).toBe(names[0].split("-")[3]); // 同一批同 rand
     expect(await fsp.readFile(path.join(tmpDir, "images", names[0]))).toEqual(b1);
     expect(await fsp.readFile(path.join(tmpDir, "images", names[1]))).toEqual(b2);
 
     const map = await loadImages(tmpDir, names);
     expect(map.get(names[0])).toBe(b1.toString("base64"));
     expect(map.get(names[1])).toBe(b2.toString("base64"));
+  });
+
+  it("同毫秒两批保存不撞名（评审轮1#4：rand 段散列，不再静默互覆文件）", async () => {
+    const { id } = await createSession(UID);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1729000000000);
+    try {
+      const [a, b, c] = await Promise.all([
+        saveImages(UID, id, [{ ext: ".png", data: Buffer.from("A") }], tmpDir),
+        saveImages(UID, id, [{ ext: ".png", data: Buffer.from("B") }], tmpDir),
+        saveImages(UID, id, [{ ext: ".png", data: Buffer.from("C") }], tmpDir),
+      ]);
+      const set = new Set([a[0], b[0], c[0]]);
+      expect(set.size).toBe(3); // 同 ts 强制成同名旧实现会塌成 1 个
+      // 每个名字都真实落盘、内容对应各自的批次（互没写串）
+      expect((await fsp.readFile(path.join(tmpDir, "images", a[0]))).toString()).toBe("A");
+      expect((await fsp.readFile(path.join(tmpDir, "images", b[0]))).toString()).toBe("B");
+      expect((await fsp.readFile(path.join(tmpDir, "images", c[0]))).toString()).toBe("C");
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it("半写回滚：第 2 张写盘失败 → 本次已落盘的第 1 张删掉、目录无残留，原始错误重抛", async () => {

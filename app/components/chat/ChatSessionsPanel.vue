@@ -65,7 +65,10 @@ const toggleChecked = (id: number): void => {
   }
 };
 
-// 首次挂载拉列表并自动选中最近一个会话；桌面常驻、移动抽屉打开时都会触发
+// 首次挂载拉列表；桌面常驻、移动抽屉打开时都会触发。
+// 自动选中最近会话仅在「没有选会话且不在草稿态」时做（评审轮1#10）：草稿态
+// （store.draftActive=「新建」后未发送）说明用户故意停在空态开口待写，断点
+// 翻转/抽屉开关导致面板 remount 时不得劫持回最近会话。
 const init = async () => {
   if (loading.value) {
     return;
@@ -73,7 +76,7 @@ const init = async () => {
   loading.value = true;
   await store.loadSessions();
   loading.value = false;
-  if (!store.currentId && firstSession.value) {
+  if (!store.currentId && !store.draftActive && firstSession.value) {
     store.loadMessages(firstSession.value.id);
   }
 };

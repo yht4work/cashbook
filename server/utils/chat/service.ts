@@ -4,7 +4,8 @@
  * - 会话 CRUD 与消息落库/读取/编辑（updateDate 驱动会话列表排序）
  * - 上下文组装（getContext：候选值查询 + 最近流水摘要 + 图编号接线）
  * - 卡片入账（saveCard：建 Flow + flows 回写 + status 派生，事务包裹）
- * - 图片文件：保存 / 读回 / 删除清理，文件名一律 chat-{sessionId}-{ts}-{n}.{ext}
+ * - 图片文件：保存 / 读回 / 删除清理，文件名
+ *   chat-{sessionId}-{ts}-{rand}-{n}.{ext}（rand 是防同毫秒并发的随机段）
  *   （只落 dataDir/images；dataDir 由 handlers 从 runtimeConfig.dataPath 接进来）
  *
  * 抛错统一为带中文 message 的普通 Error，由端点转 error()；不依赖任何
@@ -18,6 +19,7 @@ import { moneyOf, type DraftFlow } from "~~/server/utils/chat/flows";
 import { chatOnce, type OllamaCfg } from "~~/server/utils/chat/ollama";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 
 /** 与设计文档「图片窗口」一致的窗口参数：最近 3 条含图 user 轮、单次最多 6 张 */
 export const CHAT_IMAGE_WINDOW: ImageWindowOpts = { imageTurnLimit: 3, imageTotalLimit: 6 };
@@ -86,7 +88,23 @@ export const createSession = async (userId: number): Promise<{ id: number }> => 
   return { id: s.id };
 };
 
-export const deleteSession = async (userId: number, sessionId: number, dataDir: string): Promise<void> => {
+/** 该用户全部流水的被引用小票名集合（会话清理的文件保护名单）；
+ *  deleteSession 自扫，batchDelete 预扫一次复用（评审轮1#6） */
+export const referencedInvoiceNames = async (userId: number): Promise<Set<string>> => {
+  const flows = await prisma.flow.findMany({
+    where: { userId, invoice: { not: null } },
+    select: { invoice: true },
+  });
+  return new Set(flows.map((f) => f.invoice ?? "").flatMap((v) => v.split(",")));
+};
+
+export const deleteSession = async (
+  userId: number,
+  sessionId: number,
+  dataDir: string,
+  /** 预扫描的被引用小票名（batchDelete 复用一次扫描；不传则自扫） */
+  referencedNames?: Set<string>
+): Promise<void> => {
   const session = await ownSession(userId, sessionId);
 
   // 要清理的文件名得在删消息前取出来（消息没了就查不到了）
@@ -102,12 +120,10 @@ export const deleteSession = async (userId: number, sessionId: number, dataDir: 
   await prisma.chatSession.deleteMany({ where: { id: session.id, userId } }); // FK RESTRICT：消息已先删
 
   // 只删未被该用户任一 Flow.invoice 引用的：invoice 按逗号拆开做精确匹配
-  //（不能 contains——chat-1-1.png 是 chat-1-11.png 的子串）
-  const flows = await prisma.flow.findMany({
-    where: { userId, invoice: { not: null } },
-    select: { invoice: true },
-  });
-  const referenced = new Set(flows.map((f) => f.invoice ?? "").flatMap((v) => v.split(",")));
+  //（不能 contains——chat-1-1.png 是 chat-1-11.png 的子串）。
+  // referencedNames（评审轮1#6）：batchDelete 预扫一次传入，循环里不再每
+  // 会话重扫全量 Flow；单删路径不传，仍自扫（一次 findMany）。
+  const referenced = referencedNames ?? (await referencedInvoiceNames(userId));
 
   // 删除（DB）已提交；文件清理是收尾活，失败绝不能让本该成功的删除反着报错
   //（ENOENT 直接忽略，其余记日志吞掉——残留文件的损失小于删除请求 500）
@@ -247,6 +263,14 @@ export const getContext = async (
   opts?: { beforeId?: number }
 ): Promise<ChatContext> => {
   await ownSession(userId, sessionId);
+
+  // 账本归属（评审轮1#2）：入参 bookId 必须在本人名下才可用——distinct 类型
+  // 与最近流水此前只按 bookId 裸查，借 API 传他人 bookId 可把他人候选值与
+  // 最近记录带进 system prompt（经模型回声即跨用户泄露）。共享账本在
+  // inshare.ts 是「加入者 userId 的复制行」，findFirst 天然同覆盖。
+  if (!(await prisma.book.findFirst({ where: { userId, bookId }, select: { id: true } }))) {
+    throw new Error("账本不存在");
+  }
 
   const [rows, industry, pay, attribution, recent, bookRows] = await Promise.all([
     prisma.chatMessage.findMany({
@@ -505,8 +529,10 @@ export type SaveImageFile = { ext: string; data: Buffer };
 /** ext 白名单：最多 1 个前导点 + 1~5 位字母数字（防 ../ 之类的目录穿越写盘） */
 const EXT_RE = /^\.?[a-zA-Z0-9]{1,5}$/;
 
-/** 存小票图：文件名 chat-{sessionId}-{ts}-{n}.{ext}，返回落地的文件名列表
- * （中途某张写盘失败 → 已落盘的本批文件回滚删掉再重抛，不留半写孤儿；终审 R1 M3） */
+/** 存小票图：文件名 chat-{sessionId}-{ts}-{rand}-{n}.{ext}（rand=随机 3 字节
+ *  hex，评审轮1#4：同会话同毫秒的两批并发保存不再撞名静默互覆），返回落地
+ *  的文件名列表（中途某张写盘失败 → 已落盘的本批文件回滚删掉再重抛，不留
+ *  半写孤儿；终审 R1 M3） */
 export const saveImages = async (
   userId: number,
   sessionId: number,
@@ -526,6 +552,7 @@ export const saveImages = async (
   const dir = imagesDir(dataDir);
   await fs.mkdir(dir, { recursive: true });
   const ts = Date.now();
+  const rand = randomBytes(3).toString("hex"); // 批次随机段：同 ms 并发散名
   const names: string[] = [];
   try {
     for (let i = 0; i < files.length; i++) {
@@ -533,7 +560,7 @@ export const saveImages = async (
       if (ext && !ext.startsWith(".")) {
         ext = "." + ext;
       }
-      const name = `chat-${sessionId}-${ts}-${i + 1}${ext}`;
+      const name = `chat-${sessionId}-${ts}-${rand}-${i + 1}${ext}`;
       await fs.writeFile(path.join(dir, name), files[i].data);
       names.push(name);
     }

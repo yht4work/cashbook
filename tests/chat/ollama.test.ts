@@ -125,6 +125,27 @@ describe("chatStream 正常面", () => {
   });
 });
 
+describe("chatStream 挂起守卫（评审轮1#1）", () => {
+  it("headers 已到但 body 永远不来 → 无字间隙超时抛「ollama 流式响应超时」（abort 撤底层连接）", async () => {
+    // 「连上了、头到了、然后黑洞」：fetch 桩返回一个从不 enqueue/从不 close 的
+    // 流（阈值经 stallMs 注入小值——默认 90s 不可等；mini-server 真栈版会被
+    // 半开 socket 拖住 server.close，这里只钉 stall→abort→reject 的本层契约）。
+    const res = new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+      headers: { "content-type": "application/x-ndjson" },
+    });
+    const realFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: unknown }).fetch = async () => res;
+    try {
+      const p = chatStream({ baseUrl: "http://127.0.0.1:5", model: MODEL }, MESSAGES, () => {}, 25);
+      await expect(p).rejects.toThrow("ollama 流式响应超时");
+      // 挂起被掐后 onDelta 永远没得过、正文为空（半途帧不进结果）
+      await expect(p).rejects.toThrow(OllamaError);
+    } finally {
+      (globalThis as unknown as { fetch: unknown }).fetch = realFetch;
+    }
+  });
+});
+
 describe("chatStream thinking 过滤", () => {
   it("thinking 帧与 inline think 块全剥（标签被切断跨行也不漏），正文与 delta 都干净", async () => {
     const m = await startOllama((_body, res) => {
