@@ -164,7 +164,7 @@
                   v-for="(img, index) in getInvoiceImages(item.invoice)"
                   :key="index"
                 class="relative w-8 h-8 cursor-pointer group rounded overflow-hidden border border-frame-light dark:border-frame-dark hover:border-brand-500 transition-colors"
-                  @click="isPdfInvoice(img) ? openInvoiceFile(invoiceImageMap[img]) : openFullscreen(invoiceImageMap[img])"
+                  @click="openFullscreen(invoiceImageMap[img], img)"
                 >
                   <img
                     v-if="!isPdfInvoice(img)"
@@ -302,7 +302,7 @@
                 v-for="(img, index) in getInvoiceImages(item.invoice)"
                 :key="index"
                 class="relative w-6 h-6 cursor-pointer group rounded overflow-hidden border border-frame-light dark:border-frame-dark hover:border-brand-500 transition-colors"
-                @click="isPdfInvoice(img) ? openInvoiceFile(invoiceImageMap[img]) : openFullscreen(invoiceImageMap[img])"
+                @click="openFullscreen(invoiceImageMap[img], img)"
               >
                 <img
                   v-if="!isPdfInvoice(img)"
@@ -482,21 +482,13 @@
       </div>
     </div>
   </div>
-  <!-- 图片蒙版 -->
-  <div class="overlay" v-if="fullscrenn">
-    <div class="flex justify-center items-center">
-      <img
-        :src="fullscreenImage"
-        class="max-h-[95vh] max-w-[95vw] object-contains"
-        alt="Fullscreen Image"
-      />
-    </div>
-    <span
-      class="close-button bg-gray-500 hover:bg-gray-400"
-      @click="closeFullscreen"
-      >&times;</span
-    >
-  </div>
+  <!-- 小票全屏预览（图片 / PDF） -->
+  <InvoicePreviewOverlay
+    :open="fullscrenn"
+    :url="fullscreenImage"
+    :file-name="fullscreenName"
+    @close="closeFullscreen"
+  />
 </template>
 
 <script setup lang="ts">
@@ -512,11 +504,8 @@ import {
 } from "@heroicons/vue/24/outline";
 import { generateMobileFriendlyPageNumbers } from "~/utils/common";
 import { doApi } from "~/utils/api";
-import {
-  invoiceObjectUrl,
-  isPdfInvoice,
-  openInvoiceFile,
-} from "~/utils/invoice";
+import { invoiceObjectUrl, isPdfInvoice } from "~/utils/invoice";
+import InvoicePreviewOverlay from "~/components/dialog/InvoicePreviewOverlay.vue";
 
 interface FlowItem {
   id: string | number;
@@ -634,54 +623,16 @@ watch(
   { immediate: true }
 );
 
-// 全屏展示小票
+// 全屏展示小票（图片 / PDF 均走 InvoicePreviewOverlay）
 const fullscrenn = ref(false);
 const fullscreenImage = ref("");
-const openFullscreen = (image: string) => {
+const fullscreenName = ref("");
+const openFullscreen = (image: string, fileName: string) => {
   fullscrenn.value = true;
   fullscreenImage.value = image;
-  window.addEventListener("keydown", handleKeydown);
+  fullscreenName.value = fileName;
 };
 const closeFullscreen = () => {
   fullscrenn.value = false;
-  window.removeEventListener("keydown", handleKeydown);
-};
-
-const handleKeydown = (event: KeyboardEvent) => {
-  if (event.key === "Escape" && fullscrenn.value) {
-    fullscrenn.value = false;
-  }
 };
 </script>
-
-<style scoped>
-.overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background-color: rgba(0, 0, 0, 0.9);
-  z-index: 9999;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
-
-.close-button {
-  position: absolute;
-  top: 20px;
-  right: 30px;
-  color: white;
-  font-size: 30px;
-  font-weight: bold;
-  cursor: pointer;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background-color 0.3s;
-}
-</style>

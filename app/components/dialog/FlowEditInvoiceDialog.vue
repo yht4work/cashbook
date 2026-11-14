@@ -167,12 +167,12 @@
             class="max-w-60 max-h-60 rounded-lg border border-gray-200 dark:border-gray-600"
             :alt="'要删除的小票'"
           />
-          <!-- PDF：卡片预览，点击新标签查看 -->
+          <!-- PDF：卡片预览，点击弹出全屏预览 -->
           <div
             v-else
             class="w-40 h-40 rounded-lg border border-gray-200 dark:border-gray-600 overflow-hidden cursor-pointer"
             :title="deleteInvoice"
-            @click="deleteInvoice && openInvoiceFile(invoiceImage[deleteInvoice])"
+            @click="previewDeleteInvoice"
           >
             <div
               class="w-full h-full flex flex-col items-center justify-center bg-red-50 dark:bg-red-900/20 px-2"
@@ -182,7 +182,7 @@
               <span class="text-[10px] text-gray-500 dark:text-gray-400 mt-1 truncate max-w-full">
                 {{ deleteInvoice }}
               </span>
-              <span class="text-[10px] text-blue-500 mt-2">点击在新标签页查看</span>
+              <span class="text-[10px] text-blue-500 mt-2">点击全屏预览</span>
             </div>
           </div>
         </div>
@@ -212,11 +212,20 @@
       </div>
     </div>
   </div>
+
+  <!-- PDF 全屏预览 -->
+  <InvoicePreviewOverlay
+    :open="previewPdf"
+    :url="invoiceImage[deleteInvoice] || ''"
+    :file-name="deleteInvoice || ''"
+    @close="previewPdf = false"
+  />
 </template>
 
 <script setup lang="ts">
 import { showFlowEditInvoiceDialog } from "~/utils/flag";
-import { invoiceObjectUrl, isPdfInvoice, openInvoiceFile } from "~/utils/invoice";
+import { invoiceObjectUrl, isPdfInvoice } from "~/utils/invoice";
+import InvoicePreviewOverlay from "~/components/dialog/InvoicePreviewOverlay.vue";
 import { ref, nextTick } from "vue";
 import {
   XMarkIcon,
@@ -232,6 +241,17 @@ useEscapeKey(() => {
     showFlowEditInvoiceDialog.value = false;
   }
 }, showFlowEditInvoiceDialog);
+
+// PDF 全屏预览（从删除确认卡片进入）
+const previewPdf = ref(false);
+const previewDeleteInvoice = () => {
+  if (
+    deleteInvoice.value &&
+    invoiceImage.value[deleteInvoice.value]
+  ) {
+    previewPdf.value = true;
+  }
+};
 
 const { successCallback, item } = defineProps(["successCallback", "item"]);
 

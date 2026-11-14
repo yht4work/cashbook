@@ -1,7 +1,9 @@
 /**
  * 流水小票文件工具：按扩展名决定展示方式与 blob MIME。
- * 图片照旧 <img> 缩略图 + 全屏蒙层；PDF 等非图片显示为文档卡片，
- * 点击用 window.open 交给浏览器原生查看器（不做内嵌渲染）。
+ * 图片照旧 <img> 缩略图；PDF 等非图片显示为文档卡片。
+ * 点开预览统一走 InvoicePreviewOverlay：图片内嵌 <img>、
+ * PDF 内嵌 <iframe>（浏览器原生查看器），overlay 里保留
+ * 「在新标签页打开」兜底（部分移动端浏览器不渲染内嵌 PDF）。
  */
 
 const INVOICE_MIME: Record<string, string> = {
@@ -23,11 +25,6 @@ export const getInvoiceMime = (fileName: string): string => {
 
 export const isPdfInvoice = (fileName: string): boolean =>
   (fileName.toLowerCase().split(".").pop() || "") === "pdf";
-
-/** blob URL 新标签打开（PDF 等文件小票交给浏览器原生查看器） */
-export const openInvoiceFile = (url: string): void => {
-  if (url) window.open(url, "_blank");
-};
 
 /**
  * 把下载响应规范成带正确 MIME 的 blob URL。
