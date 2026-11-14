@@ -196,13 +196,22 @@
                     v-for="(img, index) in getInvoiceImages(item.invoice || '')"
                     :key="index"
                     class="relative w-8 h-8 cursor-pointer group rounded overflow-hidden border border-gray-200 dark:border-gray-600 hover:border-blue-500 transition-colors"
-                    @click="openFullscreen(invoiceImageMap[img])"
+                    @click="isPdfInvoice(img) ? openInvoiceFile(invoiceImageMap[img]) : openFullscreen(invoiceImageMap[img])"
                   >
                     <img
+                      v-if="!isPdfInvoice(img)"
                       :src="invoiceImageMap[img]"
                       class="w-full h-full object-cover"
                       :alt="`小票 ${index + 1}`"
                     />
+                    <!-- PDF：文档卡片，点击新标签查看 -->
+                    <div
+                      v-else
+                      class="w-full h-full flex flex-col items-center justify-center bg-red-50 dark:bg-red-900/20"
+                    >
+                      <DocumentIcon class="h-4 w-4 text-red-500" />
+                      <span class="text-[8px] leading-none font-semibold text-red-500">PDF</span>
+                    </div>
                     <!-- 悬停遮罩 -->
                     <div
                       class="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-30 flex items-center justify-center transition-all"
@@ -302,13 +311,22 @@
                 v-for="(img, index) in getInvoiceImages(item.invoice || '')"
                 :key="index"
                 class="relative w-8 h-8 cursor-pointer group rounded overflow-hidden border border-gray-200 dark:border-gray-600 hover:border-blue-500 transition-colors"
-                @click="openFullscreen(invoiceImageMap[img])"
+                @click="isPdfInvoice(img) ? openInvoiceFile(invoiceImageMap[img]) : openFullscreen(invoiceImageMap[img])"
               >
                 <img
+                  v-if="!isPdfInvoice(img)"
                   :src="invoiceImageMap[img]"
                   class="w-full h-full object-cover"
                   :alt="`小票 ${index + 1}`"
                 />
+                <!-- PDF：文档卡片，点击新标签查看 -->
+                <div
+                  v-else
+                  class="w-full h-full flex flex-col items-center justify-center bg-red-50 dark:bg-red-900/20"
+                >
+                  <DocumentIcon class="h-4 w-4 text-red-500" />
+                  <span class="text-[8px] leading-none font-semibold text-red-500">PDF</span>
+                </div>
                 <!-- 悬停遮罩 -->
                 <div
                   class="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-30 flex items-center justify-center transition-all"
@@ -509,12 +527,18 @@ import {
   TicketIcon,
   TrashIcon,
   EyeIcon,
+  DocumentIcon,
 } from "@heroicons/vue/24/outline";
 import { generateMobileFriendlyPageNumbers } from "~/utils/common";
 import FlowEditInvoiceDialog from "~/components/dialog/FlowEditInvoiceDialog.vue";
 import { Alert } from "~/utils/alert";
 import { Confirm } from "~/utils/confirm";
 import { doApi } from "~/utils/api";
+import {
+  invoiceObjectUrl,
+  isPdfInvoice,
+  openInvoiceFile,
+} from "~/utils/invoice";
 import { showFlowEditInvoiceDialog } from "~/utils/flag";
 
 const { query, actions = false, embedded = false } = defineProps([
@@ -768,21 +792,6 @@ const deleteFlow = (item: Flow) => {
 // 小票图片管理
 const invoiceImageMap = ref<Record<string, string>>({});
 
-// 根据文件扩展名获取 MIME 类型
-const getMimeTypeFromFileName = (fileName: string): string => {
-  const ext = fileName.toLowerCase().split(".").pop() || "";
-  const mimeTypes: Record<string, string> = {
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    png: "image/png",
-    gif: "image/gif",
-    webp: "image/webp",
-    bmp: "image/bmp",
-    svg: "image/svg+xml",
-  };
-  return mimeTypes[ext] || "image/jpeg"; // 默认为 jpeg
-};
-
 // 获取小票图片
 const getInvoiceImage = async (invoice: string) => {
   if (!invoice || invoice === "") {
@@ -794,24 +803,8 @@ const getInvoiceImage = async (invoice: string) => {
     });
     if (!res) return "";
 
-    // 获取正确的 MIME 类型
-    const mimeType = getMimeTypeFromFileName(invoice);
-
-    // 确保 Blob 有正确的 MIME 类型，这样浏览器才能正确识别图片
-    // 如果原 Blob 没有类型或类型不正确，创建新的 Blob 并指定正确的类型
-    let blob: Blob;
-    if (res instanceof Blob) {
-      // 如果原 Blob 已经有正确的类型，直接使用；否则创建新的 Blob
-      if (res.type === mimeType) {
-        blob = res;
-      } else {
-        blob = new Blob([res], { type: mimeType });
-      }
-    } else {
-      blob = new Blob([res], { type: mimeType });
-    }
-
-    return URL.createObjectURL(blob);
+    // 按扩展名规范 blob MIME（图片照旧，PDF 带 application/pdf，未识别类型保持原样）
+    return invoiceObjectUrl(res, invoice);
   } catch (e) {
     return "";
   }

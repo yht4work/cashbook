@@ -41,10 +41,21 @@
               @click="removeInvoice(img)"
             >
               <img
+                v-if="!isPdfInvoice(img)"
                 :src="invoiceImage[img]"
                 class="w-full h-full object-cover"
                 :alt="`小票 ${index + 1}`"
               />
+              <!-- PDF：文档卡片，点击新标签查看 -->
+              <div
+                v-else
+                class="w-full h-full flex flex-col items-center justify-center bg-red-50 dark:bg-red-900/20"
+              >
+                <DocumentIcon class="w-7 h-7 text-red-500" />
+                <span class="text-[10px] font-semibold text-red-500 mt-0.5">
+                  {{ img.split(".").pop()?.toUpperCase() }}
+                </span>
+              </div>
               <!-- 删除悬停遮罩 -->
               <div
                 v-if="isHovering === img"
@@ -72,7 +83,7 @@
             <input
               type="file"
               ref="fileInput"
-              accept="image/*"
+              accept="image/*,.pdf"
               @change="onFileChange"
               class="hidden"
             />
@@ -82,7 +93,7 @@
             >
               <PhotoIcon class="h-6 w-6 text-gray-400" />
               <span class="text-sm">
-                {{ newInvoice ? newInvoice.name : "点击选择小票图片" }}
+                {{ newInvoice ? newInvoice.name : "点击选择小票（图片或 PDF）" }}
               </span>
             </button>
             <!-- 文件信息 -->
@@ -149,11 +160,31 @@
       <!-- 内容 -->
       <div class="p-4">
         <div class="flex justify-center mb-4">
+          <!-- 图片：直接预览 -->
           <img
+            v-if="deleteInvoice && !isPdfInvoice(deleteInvoice)"
             :src="invoiceImage[deleteInvoice]"
             class="max-w-60 max-h-60 rounded-lg border border-gray-200 dark:border-gray-600"
             :alt="'要删除的小票'"
           />
+          <!-- PDF：卡片预览，点击新标签查看 -->
+          <div
+            v-else
+            class="w-40 h-40 rounded-lg border border-gray-200 dark:border-gray-600 overflow-hidden cursor-pointer"
+            :title="deleteInvoice"
+            @click="deleteInvoice && openInvoiceFile(invoiceImage[deleteInvoice])"
+          >
+            <div
+              class="w-full h-full flex flex-col items-center justify-center bg-red-50 dark:bg-red-900/20 px-2"
+            >
+              <DocumentIcon class="w-10 h-10 text-red-500" />
+              <span class="text-xs font-semibold text-red-500 mt-1">PDF</span>
+              <span class="text-[10px] text-gray-500 dark:text-gray-400 mt-1 truncate max-w-full">
+                {{ deleteInvoice }}
+              </span>
+              <span class="text-[10px] text-blue-500 mt-2">点击在新标签页查看</span>
+            </div>
+          </div>
         </div>
         <p class="text-sm text-gray-600 dark:text-gray-400 text-center">
           删除后无法恢复，请确认是否删除此小票？
@@ -185,6 +216,7 @@
 
 <script setup lang="ts">
 import { showFlowEditInvoiceDialog } from "~/utils/flag";
+import { invoiceObjectUrl, isPdfInvoice, openInvoiceFile } from "~/utils/invoice";
 import { ref, nextTick } from "vue";
 import {
   XMarkIcon,
@@ -217,7 +249,7 @@ const getInvoiceImage = async (invoice: string) => {
     const res = await doApi.download("api/entry/flow/invoice/show", {
       invoice,
     });
-    return res ? URL.createObjectURL(res) : res;
+    return res ? invoiceObjectUrl(res, invoice) : "";
   } catch (e) {
     return "";
   }
