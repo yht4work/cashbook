@@ -1,12 +1,13 @@
 import * as fs from "fs";
 import * as path from "path";
 import prisma from "~~/server/lib/prisma";
+import { invoiceReferenced } from "~~/server/utils/invoiceStore";
 
 /**
  * @swagger
  * /api/entry/flow/invoice/clean:
  *   post:
- *     summary: 清理流水所有发票
+ *     summary: 清理流水所有发票（逐名查引用：仍被其他 Flow/ChatMessage 记着的只摘名）
  *     tags: ["Invoice"]
  *     security:
  *       - Authorization: []
@@ -59,7 +60,8 @@ export default defineEventHandler(async (event) => {
 
     const invoices = flow.invoice ? flow.invoice.split(",") : [];
 
-    // 删除文件
+    // 逐名查引用后物理删除：仍被其他 Flow / 聊天消息记着的只摘名（本行
+    // 马上要清空），不被引用的才 unlink——与 invoice/del 同一套语义
     for (const invoice of invoices) {
       const runtimeConfig = useRuntimeConfig();
       let dataPath = String(runtimeConfig.dataPath);
@@ -72,7 +74,9 @@ export default defineEventHandler(async (event) => {
 
       // 校验图片是否存在
       if (fs.existsSync(imagePath)) {
-        await fs.promises.unlink(imagePath);
+        if (!(await invoiceReferenced(invoice, Number(id)))) {
+          await fs.promises.unlink(imagePath);
+        }
       }
     }
 

@@ -1,12 +1,13 @@
 import * as fs from "fs";
 import * as path from "path";
 import prisma from "~~/server/lib/prisma";
+import { findSameContent } from "~~/server/utils/invoiceStore";
 
 /**
  * @swagger
  * /api/entry/flow/invoice/upload:
  *   post:
- *     summary: 上传流水发票
+ *     summary: 上传流水发票（同内容复用盘上文件，一票挂多账不重复落盘）
  *     tags: ["Invoice"]
  *     security:
  *       - Authorization: []
@@ -63,15 +64,22 @@ export default defineEventHandler(async (event) => {
     const imageNames: string[] = [];
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      // 获取文件扩展名
-      const extension = path.extname(file.name);
-      const fileName = `${bookId}-${flowId}-${Date.now()}-${i + 1}${extension}`;
-
       // 读取文件数据
       const fileBuffer = Buffer.from(await file.arrayBuffer());
 
-      // 对于不支持处理的格式，如svg、ico，直接保存
-      await fs.promises.writeFile(path.join(invoicePath, fileName), fileBuffer);
+      // 内容相同即复用盘上文件（一票挂多账不翻倍）；同请求内重复不复用
+      // （skip=imageNames，保持一行内名字互异），此时必然走落盘新文件
+      const reused = await findSameContent(dataPath, fileBuffer, imageNames);
+      let fileName: string;
+      if (reused) {
+        fileName = reused;
+      } else {
+        // 获取文件扩展名
+        const extension = path.extname(file.name);
+        fileName = `${bookId}-${flowId}-${Date.now()}-${i + 1}${extension}`;
+        // 对于不支持处理的格式，如svg、ico，直接保存
+        await fs.promises.writeFile(path.join(invoicePath, fileName), fileBuffer);
+      }
       imageNames.push(fileName);
     }
     const flow = await prisma.flow.findUnique({
@@ -87,7 +95,9 @@ export default defineEventHandler(async (event) => {
     if (flow.invoice) {
       newInvoices.push(...flow.invoice.split(","));
     }
-    newInvoices.push(...imageNames);
+    // 已在本行的文件名不再追加：同人同票重复上传按幂等处理，
+    // 也避免行内重复 token 让 del 的引用检查漏判「本行还留着同名字」
+    newInvoices.push(...imageNames.filter((n) => !newInvoices.includes(n)));
     // 更新流水信息
     await prisma.flow.update({
       where: {

@@ -1,12 +1,13 @@
 import * as fs from "fs";
 import * as path from "path";
 import prisma from "~~/server/lib/prisma";
+import { invoiceReferenced } from "~~/server/utils/invoiceStore";
 
 /**
  * @swagger
  * /api/entry/flow/invoice/del:
  *   post:
- *     summary: 删除流水发票
+ *     summary: 删除流水发票（摘名；物理删除前查引用，仍被其他 Flow/ChatMessage 记着则保留文件）
  *     tags: ["Invoice"]
  *     security:
  *       - Authorization: []
@@ -66,17 +67,19 @@ export default defineEventHandler(async (event) => {
         bookId: String(bookId),
       },
     });
-    // 校验图片是否存在
-    if (!fs.existsSync(imagePath)) {
-      // 图片不存在 无需删除
-    } else {
-      // 删除文件
-      await fs.promises.unlink(imagePath);
-    }
 
     if (!flow) {
       return error("流水信息不存在");
     }
+
+    // 文件存在才谈删除；物理删除前查引用（其他 Flow / 聊天消息）——
+    // 仍被别的行记着就只摘名不删文件，避免删 A 裂 B
+    if (fs.existsSync(imagePath)) {
+      if (!(await invoiceReferenced(String(invoice), Number(id)))) {
+        await fs.promises.unlink(imagePath);
+      }
+    }
+
     const invoices = flow.invoice ? flow.invoice.split(",") : [];
     const newInvoices = invoices.filter((item) => item !== invoice);
 
